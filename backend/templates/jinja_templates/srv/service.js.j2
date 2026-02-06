@@ -1,0 +1,34 @@
+{# Service Handler JavaScript Template #}
+{# Generates srv/service.js #}
+
+const cds = require('@sap/cds');
+
+module.exports = cds.service.impl(async function() {
+    const { {{ entities | join(', ') }} } = this.entities;
+
+{% for handler in handlers %}
+    // {{ handler.description }}
+    this.{{ handler.event }}('{{ handler.entity }}', async (req) => {
+{% if handler.code %}
+{{ handler.code | indent(8) }}
+{% else %}
+        // TODO: Implement {{ handler.event }} handler
+        console.log('{{ handler.entity }} {{ handler.event }} called');
+{% endif %}
+    });
+
+{% endfor %}
+{% for action in actions %}
+    // Action: {{ action.name }}
+    this.on('{{ action.name }}', async (req) => {
+{% if action.code %}
+{{ action.code | indent(8) }}
+{% else %}
+        const { {{ action.params | join(', ') }} } = req.data;
+        // TODO: Implement action logic
+        return { message: '{{ action.name }} executed' };
+{% endif %}
+    });
+
+{% endfor %}
+});

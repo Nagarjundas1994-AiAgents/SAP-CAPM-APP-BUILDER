@@ -1,0 +1,118 @@
+{# Fiori manifest.json Template #}
+{
+  "_version": "1.59.0",
+  "sap.app": {
+    "id": "{{ app_id }}",
+    "type": "application",
+    "i18n": "i18n/i18n.properties",
+    "title": "{% raw %}{{{% endraw %}appTitle{% raw %}}}{% endraw %}",
+    "description": "{% raw %}{{{% endraw %}appDescription{% raw %}}}{% endraw %}",
+    "applicationVersion": {
+      "version": "1.0.0"
+    },
+    "dataSources": {
+      "mainService": {
+        "uri": "{{ service_path }}",
+        "type": "OData",
+        "settings": {
+          "odataVersion": "4.0",
+          "localUri": "localService/metadata.xml"
+        }
+      }
+    }
+  },
+  "sap.ui": {
+    "technology": "UI5",
+    "icons": {
+      "icon": "sap-icon://task"
+    },
+    "deviceTypes": {
+      "desktop": true,
+      "tablet": true,
+      "phone": true
+    }
+  },
+  "sap.ui5": {
+    "flexEnabled": true,
+    "dependencies": {
+      "minUI5Version": "1.120.0",
+      "libs": {
+        "sap.m": {},
+        "sap.ui.core": {},
+        "sap.ushell": {},
+        "sap.fe.templates": {}
+      }
+    },
+    "contentDensities": {
+      "compact": true,
+      "cozy": true
+    },
+    "models": {
+      "": {
+        "dataSource": "mainService",
+        "settings": {
+          "synchronizationMode": "None",
+          "operationMode": "Server",
+          "autoExpandSelect": true,
+          "earlyRequests": true
+        }
+      },
+      "i18n": {
+        "type": "sap.ui.model.resource.ResourceModel",
+        "settings": {
+          "bundleName": "{{ app_id | replace('.', '/') }}/i18n/i18n"
+        }
+      }
+    },
+    "routing": {
+      "config": {},
+      "routes": [
+        {
+          "name": "{{ main_entity }}List",
+          "pattern": ":?query:",
+          "target": "{{ main_entity }}List"
+        },
+        {
+          "name": "{{ main_entity }}ObjectPage",
+          "pattern": "{{ main_entity }}({key}):?query:",
+          "target": "{{ main_entity }}ObjectPage"
+        }
+      ],
+      "targets": {
+        "{{ main_entity }}List": {
+          "type": "Component",
+          "id": "{{ main_entity }}List",
+          "name": "sap.fe.templates.ListReport",
+          "options": {
+            "settings": {
+              "entitySet": "{{ main_entity }}",
+              "variantManagement": "Page",
+              "navigation": {
+                "{{ main_entity }}": {
+                  "detail": {
+                    "route": "{{ main_entity }}ObjectPage"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "{{ main_entity }}ObjectPage": {
+          "type": "Component",
+          "id": "{{ main_entity }}ObjectPage",
+          "name": "sap.fe.templates.ObjectPage",
+          "options": {
+            "settings": {
+              "entitySet": "{{ main_entity }}",
+              "editableHeaderContent": false
+            }
+          }
+        }
+      }
+    }
+  },
+  "sap.fiori": {
+    "registrationIds": [],
+    "archeType": "transactional"
+  }
+}

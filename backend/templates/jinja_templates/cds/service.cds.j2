@@ -1,0 +1,20 @@
+{# CDS Service Template #}
+{# Generates srv/service.cds #}
+
+using { {{ namespace }} as db } from '../db/schema';
+
+{% if odata_version == 'v2' %}
+@protocol: 'odata-v2'
+{% else %}
+@protocol: 'odata-v4'
+{% endif %}
+service {{ service_name }} @(path: '/{{ service_name | lower }}') {
+
+{% for entity in entities %}
+{% if draft_enabled %}
+    @odata.draft.enabled
+{% endif %}
+    entity {{ entity }} as projection on db.{{ entity }};
+
+{% endfor %}
+}

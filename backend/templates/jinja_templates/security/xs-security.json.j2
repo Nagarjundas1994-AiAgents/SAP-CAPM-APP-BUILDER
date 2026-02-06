@@ -1,0 +1,43 @@
+{# xs-security.json Template #}
+{
+  "xsappname": "{{ xsappname }}",
+  "tenant-mode": "dedicated",
+  "scopes": [
+{% for scope in scopes %}
+    {
+      "name": "$XSAPPNAME.{{ scope.name }}",
+      "description": "{{ scope.description }}"
+    }{% if not loop.last %},{% endif %}
+
+{% endfor %}
+  ],
+  "attributes": [],
+  "role-templates": [
+{% for role in roles %}
+    {
+      "name": "{{ role.name }}",
+      "description": "{{ role.description }}",
+      "scope-references": [
+{% for scope in role.scopes %}
+        "$XSAPPNAME.{{ scope }}"{% if not loop.last %},{% endif %}
+
+{% endfor %}
+      ],
+      "attribute-references": []
+    }{% if not loop.last %},{% endif %}
+
+{% endfor %}
+  ],
+  "role-collections": [
+{% for role in roles %}
+    {
+      "name": "{{ xsappname }}_{{ role.name }}",
+      "description": "{{ role.description }}",
+      "role-template-references": [
+        "$XSAPPNAME.{{ role.name }}"
+      ]
+    }{% if not loop.last %},{% endif %}
+
+{% endfor %}
+  ]
+}

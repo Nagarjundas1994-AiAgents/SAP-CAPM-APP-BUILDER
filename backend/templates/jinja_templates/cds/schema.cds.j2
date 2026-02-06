@@ -1,0 +1,48 @@
+{# CDS Schema Template #}
+{# Generates db/schema.cds #}
+
+namespace {{ namespace }};
+
+{# Common aspects #}
+{% if aspects %}
+// Common Aspects
+{% for aspect in aspects %}
+aspect {{ aspect.name }} {
+{% for field in aspect.fields %}
+    {{ field.name }} : {{ field.type }}{% if field.default %} default {{ field.default }}{% endif %};
+{% endfor %}
+}
+
+{% endfor %}
+{% endif %}
+
+// Managed Aspect (audit fields)
+aspect managed {
+    createdAt  : Timestamp @cds.on.insert: $now;
+    createdBy  : String(255) @cds.on.insert: $user;
+    modifiedAt : Timestamp @cds.on.insert: $now @cds.on.update: $now;
+    modifiedBy : String(255) @cds.on.insert: $user @cds.on.update: $user;
+}
+
+{# Entity definitions #}
+{% for entity in entities %}
+/**
+ * {{ entity.description or entity.name }}
+ */
+entity {{ entity.name }} : managed {
+{% for field in entity.fields %}
+{% if field.key %}
+    key {{ field.name }} : {{ field.type }};
+{% else %}
+    {{ field.name }} : {{ field.type }}{% if not field.nullable %} not null{% endif %}{% if field.default %} default {{ field.default }}{% endif %};
+{% endif %}
+{% endfor %}
+{% for assoc in entity.associations or [] %}
+    {{ assoc.name }} : Association to {{ assoc.target }}{% if assoc.on %} on {{ assoc.on }}{% endif %};
+{% endfor %}
+{% for comp in entity.compositions or [] %}
+    {{ comp.name }} : Composition of many {{ comp.target }}{% if comp.on %} on {{ comp.on }}{% endif %};
+{% endfor %}
+}
+
+{% endfor %}

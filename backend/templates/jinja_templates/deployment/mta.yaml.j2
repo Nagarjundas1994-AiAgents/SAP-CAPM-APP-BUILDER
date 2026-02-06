@@ -1,0 +1,84 @@
+{# MTA Deployment Descriptor Template #}
+_schema-version: "3.1"
+ID: {{ project_id }}
+description: {{ project_name }}
+version: 1.0.0
+
+parameters:
+  enable-parallel-deployments: true
+
+build-parameters:
+  before-all:
+    - builder: custom
+      commands:
+        - npm ci
+        - npx cds build --production
+
+modules:
+{% for module in modules %}
+  - name: {{ module.name }}
+    type: {{ module.type }}
+{% if module.path %}
+    path: {{ module.path }}
+{% endif %}
+{% if module.build_parameters %}
+    build-parameters:
+{% for key, value in module.build_parameters.items() %}
+      {{ key }}: {{ value }}
+{% endfor %}
+{% endif %}
+{% if module.requires %}
+    requires:
+{% for req in module.requires %}
+      - name: {{ req.name }}
+{% if req.group %}
+        group: {{ req.group }}
+{% endif %}
+{% if req.properties %}
+        properties:
+{% for key, value in req.properties.items() %}
+          {{ key }}: {{ value }}
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% endif %}
+{% if module.provides %}
+    provides:
+{% for prov in module.provides %}
+      - name: {{ prov.name }}
+{% if prov.properties %}
+        properties:
+{% for key, value in prov.properties.items() %}
+          {{ key }}: {{ value }}
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% endif %}
+{% if module.parameters %}
+    parameters:
+{% for key, value in module.parameters.items() %}
+      {{ key }}: {{ value }}
+{% endfor %}
+{% endif %}
+
+{% endfor %}
+
+resources:
+{% for resource in resources %}
+  - name: {{ resource.name }}
+    type: {{ resource.type }}
+{% if resource.parameters %}
+    parameters:
+{% for key, value in resource.parameters.items() %}
+{% if value is mapping %}
+      {{ key }}:
+{% for k, v in value.items() %}
+        {{ k }}: {{ v }}
+{% endfor %}
+{% else %}
+      {{ key }}: {{ value }}
+{% endif %}
+{% endfor %}
+{% endif %}
+
+{% endfor %}

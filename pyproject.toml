@@ -1,0 +1,65 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend"]
+
+[project]
+name = "sap-app-builder"
+version = "0.1.0"
+description = "AI-powered SAP CAPM + Fiori Application Builder Platform"
+authors = [{ name = "SAP App Builder Team" }]
+requires-python = ">=3.11"
+
+dependencies = [
+    # FastAPI & Web
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "python-multipart>=0.0.6",
+    "httpx>=0.26.0",
+    
+    # Database
+    "sqlalchemy[asyncio]>=2.0.25",
+    "aiosqlite>=0.19.0",
+    "alembic>=1.13.1",
+    
+    # LangGraph & LLMs
+    "langgraph>=0.0.40",
+    "langchain>=0.1.0",
+    "langchain-openai>=0.0.5",
+    "langchain-google-genai>=0.0.6",
+    "openai>=1.10.0",
+    "google-generativeai>=0.3.2",
+    
+    # Templates & Utilities
+    "jinja2>=3.1.3",
+    "pydantic>=2.5.3",
+    "pydantic-settings>=2.1.0",
+    "python-dotenv>=1.0.0",
+    
+    # File handling
+    "aiofiles>=23.2.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.4",
+    "pytest-asyncio>=0.23.3",
+    "pytest-cov>=4.1.0",
+    "black>=24.1.1",
+    "ruff>=0.1.14",
+    "mypy>=1.8.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["backend/tests"]

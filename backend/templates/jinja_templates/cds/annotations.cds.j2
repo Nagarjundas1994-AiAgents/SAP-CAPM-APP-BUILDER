@@ -1,0 +1,50 @@
+{# UI Annotations Template #}
+{# Generates srv/annotations.cds #}
+
+using from './service';
+
+{% for entity in entities %}
+/**
+ * UI Annotations for {{ entity.name }}
+ */
+annotate {{ entity.name }} with @(
+    UI.SelectionFields: [
+{% for field in entity.selection_fields or entity.fields[:3] %}
+        {{ field.name if field is mapping else field }}{% if not loop.last %},{% endif %}
+
+{% endfor %}
+    ],
+    UI.LineItem: [
+{% for field in entity.line_item_fields or entity.fields[:6] %}
+        { Value: {{ field.name if field is mapping else field }} }{% if not loop.last %},{% endif %}
+
+{% endfor %}
+    ],
+    UI.HeaderInfo: {
+        TypeName: '{{ entity.name }}',
+        TypeNamePlural: '{{ entity.name }}s',
+{% if entity.title_field %}
+        Title: { Value: {{ entity.title_field }} },
+{% endif %}
+{% if entity.description_field %}
+        Description: { Value: {{ entity.description_field }} }
+{% endif %}
+    },
+    UI.Facets: [
+        {
+            $Type: 'UI.ReferenceFacet',
+            Label: 'General Information',
+            Target: '@UI.FieldGroup#GeneralInfo'
+        }
+    ],
+    UI.FieldGroup#GeneralInfo: {
+        Data: [
+{% for field in entity.fields %}
+            { Value: {{ field.name if field is mapping else field }} }{% if not loop.last %},{% endif %}
+
+{% endfor %}
+        ]
+    }
+);
+
+{% endfor %}
