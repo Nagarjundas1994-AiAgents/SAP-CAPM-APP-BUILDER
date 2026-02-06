@@ -186,6 +186,45 @@ async def get_session(
     )
 
 
+@router.put("/{session_id}", response_model=SessionResponse)
+async def update_session(
+    session_id: str,
+    request: SessionUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update session (direct update)."""
+    result = await db.execute(select(Session).where(Session.id == session_id))
+    session = result.scalar_one_or_none()
+    
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {session_id} not found",
+        )
+    
+    # Merge configuration
+    current_config = session.configuration or {}
+    current_config.update(request.configuration)
+    session.configuration = current_config
+    session.updated_at = datetime.utcnow()
+    
+    await db.commit()
+    await db.refresh(session)
+    
+    logger.info(f"Updated session {session_id}")
+    
+    return SessionResponse(
+        id=session.id,
+        project_name=session.project_name,
+        project_namespace=session.project_namespace,
+        project_description=session.project_description,
+        status=session.status,
+        configuration=session.configuration,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+    )
+
+
 @router.put("/{session_id}/config", response_model=SessionResponse)
 async def update_session_config(
     session_id: str,

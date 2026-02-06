@@ -233,11 +233,11 @@ def validate_project_name(name: str) -> list[ValidationError]:
             "severity": "error",
         })
     
-    if not all(c.isalnum() or c in "-_" for c in name):
+    if not all(c.isalnum() or c in "-_ " for c in name):
         errors.append({
             "agent": "requirements",
             "code": "PROJECT_NAME_INVALID_CHARS",
-            "message": "Project name can only contain letters, numbers, hyphens, and underscores",
+            "message": "Project name can only contain letters, numbers, spaces, hyphens, and underscores",
             "field": "project_name",
             "severity": "error",
         })
