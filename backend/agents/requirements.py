@@ -329,6 +329,60 @@ def validate_entities(entities: list[EntityDefinition]) -> list[ValidationError]
     return errors
 
 
+def generate_fallback_entities(user_entities: list) -> list:
+    """Generate basic entity definitions when LLM fails.
+    
+    Creates standard fields for each entity provided by the user.
+    """
+    generated = []
+    
+    for entity in user_entities:
+        name = entity.get("name", "Entity")
+        
+        # Generate standard fields based on entity name
+        fields = [
+            {"name": "ID", "type": "UUID", "key": True, "nullable": False},
+            {"name": "name", "type": "String", "length": 100, "nullable": False},
+            {"name": "description", "type": "LargeString", "nullable": True},
+            {"name": "status", "type": "String", "length": 20, "nullable": False, "default": "'Active'"},
+        ]
+        
+        # Add some common fields based on entity name patterns
+        name_lower = name.lower()
+        if "order" in name_lower or "invoice" in name_lower:
+            fields.extend([
+                {"name": "orderDate", "type": "DateTime", "nullable": False},
+                {"name": "totalAmount", "type": "Decimal", "precision": 12, "scale": 2, "nullable": False},
+                {"name": "currency", "type": "String", "length": 3, "nullable": False, "default": "'USD'"},
+            ])
+        elif "product" in name_lower or "item" in name_lower:
+            fields.extend([
+                {"name": "price", "type": "Decimal", "precision": 10, "scale": 2, "nullable": False},
+                {"name": "quantity", "type": "Integer", "nullable": False, "default": "0"},
+            ])
+        elif "customer" in name_lower or "user" in name_lower or "employee" in name_lower:
+            fields.extend([
+                {"name": "email", "type": "String", "length": 255, "nullable": True},
+                {"name": "phone", "type": "String", "length": 50, "nullable": True},
+            ])
+        elif "incident" in name_lower or "ticket" in name_lower or "issue" in name_lower:
+            fields.extend([
+                {"name": "priority", "type": "String", "length": 20, "nullable": False, "default": "'Medium'"},
+                {"name": "category", "type": "String", "length": 50, "nullable": True},
+                {"name": "assignedTo", "type": "String", "length": 100, "nullable": True},
+                {"name": "resolvedDate", "type": "DateTime", "nullable": True},
+            ])
+        
+        generated.append({
+            "name": name,
+            "description": f"{name} entity",
+            "fields": fields,
+            "aspects": ["cuid", "managed"],
+        })
+    
+    return generated
+
+
 # =============================================================================
 # Main Agent Function
 # =============================================================================
@@ -381,12 +435,85 @@ async def requirements_agent(state: BuilderState) -> BuilderState:
         state["business_rules"] = template.get("business_rules", [])
     
     elif state.get("entities"):
-        # User provided entities - validate them
-        logger.info("Validating user-provided entities")
-        errors.extend(validate_entities(state.get("entities", [])))
+        # User provided entities - check if they have fields defined
+        user_entities = state.get("entities", [])
+        entities_need_fields = any(not e.get("fields") for e in user_entities)
+        
+        if entities_need_fields:
+            # Entities have no fields - use LLM to generate full entity definitions
+            logger.info("User provided entity names but no fields. Using LLM to generate complete entity definitions.")
+            
+            try:
+                llm_manager = get_llm_manager()
+                provider = state.get("llm_provider")
+                
+                entity_names = [e.get("name", "") for e in user_entities]
+                
+                prompt = f"""Generate complete CDS entity definitions for the following entities in a {project_name} application.
+
+Entity Names: {', '.join(entity_names)}
+Project Description: {state.get('project_description', 'No description provided')}
+
+For each entity, generate:
+- name: The entity name (PascalCase)
+- description: Brief description of what this entity represents
+- fields: Array of fields with:
+  - name: Field name (camelCase)  
+  - type: CDS type (String, Integer, Decimal, Date, DateTime, Boolean, UUID, LargeString)
+  - length: For String types (optional)
+  - key: true for primary key (first field should be UUID key named "ID")
+  - nullable: true/false
+- aspects: ["cuid", "managed"] for audit fields
+
+Also generate relationships between entities if applicable.
+
+Respond with ONLY valid JSON:
+{{
+  "entities": [...],
+  "relationships": [...],
+  "business_rules": [...]
+}}"""
+                
+                response = await llm_manager.generate(
+                    prompt=prompt,
+                    system_prompt=REQUIREMENTS_SYSTEM_PROMPT,
+                    provider=provider,
+                    temperature=0.1,
+                )
+                
+                # Parse JSON response
+                import json
+                try:
+                    response = response.strip()
+                    if response.startswith("```json"):
+                        response = response[7:]
+                    if response.startswith("```"):
+                        response = response[3:]
+                    if response.endswith("```"):
+                        response = response[:-3]
+                    
+                    extracted = json.loads(response.strip())
+                    state["entities"] = extracted.get("entities", user_entities)
+                    state["relationships"] = extracted.get("relationships", [])
+                    state["business_rules"] = extracted.get("business_rules", [])
+                    logger.info(f"LLM generated {len(state['entities'])} entities with fields")
+                    
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse LLM response: {e}. Using fallback entity generation.")
+                    # Fallback: generate basic fields for each entity
+                    state["entities"] = generate_fallback_entities(user_entities)
+                    
+            except Exception as e:
+                logger.error(f"LLM entity generation failed: {e}. Using fallback.")
+                # Fallback: generate basic fields
+                state["entities"] = generate_fallback_entities(user_entities)
+        else:
+            # Entities have fields - just validate
+            logger.info("Validating user-provided entities with fields")
+            errors.extend(validate_entities(user_entities))
     
     else:
-        # Custom domain without entities - use LLM to extract
+        # Custom domain without entities - use LLM to extract from description
         logger.info("Extracting entities from description using LLM")
         
         description = state.get("project_description", "")

@@ -104,15 +104,15 @@ async def start_generation(
         project_description=session.project_description or "",
     )
     
-    # Merge saved configuration
+    # Merge ALL saved configuration (not just keys that exist in initial_state)
     config = session.configuration or {}
-    for key, value in config.items():
-        if key in initial_state:
-            initial_state[key] = value
+    initial_state.update(config)
     
-    # Set LLM provider if specified
+    # Set LLM provider if specified in request
     if request.llm_provider:
         initial_state["llm_provider"] = request.llm_provider
+    
+    logger.info(f"Starting generation with {len(initial_state.get('entities', []))} entities, provider={initial_state.get('llm_provider')}")
     
     # Update session status
     session.status = "in_progress"
