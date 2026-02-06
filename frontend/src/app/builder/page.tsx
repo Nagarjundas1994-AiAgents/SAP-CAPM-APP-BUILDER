@@ -79,6 +79,7 @@ export default function BuilderPage() {
   const [entities, setEntities] = useState<string[]>([]);
   const [newEntity, setNewEntity] = useState('');
   const [llmProvider, setLlmProvider] = useState('openai');
+  const [llmModel, setLlmModel] = useState('gpt-5.2');
   const [fioriTheme, setFioriTheme] = useState('sap_horizon');
   const [authType, setAuthType] = useState('mock');
 
@@ -173,6 +174,7 @@ export default function BuilderPage() {
           domain: selectedDomain,
           entities: entities.map((name) => ({ name, fields: [] })),
           llm_provider: llmProvider,
+          llm_model: llmModel,
           fiori_theme: fioriTheme,
           auth_type: authType,
           fiori_main_entity: entities[0] || 'Entity',
@@ -182,6 +184,7 @@ export default function BuilderPage() {
       // Start generation
       const status = await startGeneration(session.id, {
         llm_provider: llmProvider,
+        llm_model: llmModel,
       });
 
       setAgentHistory(status.agent_history);
@@ -257,19 +260,76 @@ export default function BuilderPage() {
               />
             </div>
 
-            <div>
+          <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">
                 LLM Provider
               </label>
               <select
                 value={llmProvider}
-                onChange={(e) => setLlmProvider(e.target.value)}
-                className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-white focus:outline-none focus:border-blue-500 transition-colors"
+                onChange={(e) => {
+                  setLlmProvider(e.target.value);
+                  // Reset model when provider changes
+                  const defaultModels: Record<string, string> = {
+                    openai: 'gpt-5.2',
+                    gemini: 'gemini-3-pro',
+                    deepseek: 'deepseek-chat',
+                    kimi: 'kimi-k2.5'
+                  };
+                  setLlmModel(defaultModels[e.target.value] || 'gpt-5.2');
+                }}
+                className="w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-xl text-white focus:outline-none focus:border-blue-500 transition-colors"
               >
-                <option value="openai">OpenAI GPT-4</option>
-                <option value="gemini">Google Gemini</option>
-                <option value="deepseek">DeepSeek</option>
-                <option value="kimi">Kimi K2.5</option>
+                <option value="openai" className="bg-gray-900 text-white">OpenAI</option>
+                <option value="gemini" className="bg-gray-900 text-white">Google Gemini</option>
+                <option value="deepseek" className="bg-gray-900 text-white">DeepSeek</option>
+                <option value="kimi" className="bg-gray-900 text-white">Kimi (Moonshot)</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-2">
+                Model
+              </label>
+              <select
+                value={llmModel}
+                onChange={(e) => setLlmModel(e.target.value)}
+                className="w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-xl text-white focus:outline-none focus:border-blue-500 transition-colors"
+              >
+                {llmProvider === 'openai' && (
+                  <>
+                    <option value="gpt-5.2" className="bg-gray-900 text-white">GPT-5.2 (Latest - Recommended)</option>
+                    <option value="gpt-5.3-codex" className="bg-gray-900 text-white">GPT-5.3 Codex (Best for Code)</option>
+                    <option value="gpt-4o" className="bg-gray-900 text-white">GPT-4o</option>
+                    <option value="o3" className="bg-gray-900 text-white">o3 (Best Reasoning)</option>
+                    <option value="o3-mini" className="bg-gray-900 text-white">o3 Mini (Faster)</option>
+                  </>
+                )}
+                {llmProvider === 'gemini' && (
+                  <>
+                    <option value="gemini-3-pro" className="bg-gray-900 text-white">Gemini 3 Pro (Latest - Recommended)</option>
+                    <option value="gemini-3-flash" className="bg-gray-900 text-white">Gemini 3 Flash (Faster)</option>
+                    <option value="gemini-3-deep-think" className="bg-gray-900 text-white">Gemini 3 Deep Think (Best Reasoning)</option>
+                    <option value="gemini-2.5-pro" className="bg-gray-900 text-white">Gemini 2.5 Pro</option>
+                    <option value="gemini-2.5-pro" className="bg-gray-900 text-white">Gemini 2.5 Pro (Recommended)</option>
+                    <option value="gemini-2.5-flash" className="bg-gray-900 text-white">Gemini 2.5 Flash (Faster)</option>
+                    <option value="gemini-2.0-flash" className="bg-gray-900 text-white">Gemini 2.0 Flash</option>
+                    
+                  </>
+                )}
+                {llmProvider === 'deepseek' && (
+                  <>
+                    <option value="deepseek-chat" className="bg-gray-900 text-white">DeepSeek V3.2 Chat (Recommended)</option>
+                    <option value="deepseek-reasoner" className="bg-gray-900 text-white">DeepSeek R1 (Best Reasoning)</option>
+                    <option value="deepseek-coder" className="bg-gray-900 text-white">DeepSeek Coder V2</option>
+                  </>
+                )}
+                {llmProvider === 'kimi' && (
+                  <>
+                    <option value="kimi-k2.5" className="bg-gray-900 text-white">Kimi K2.5 (Latest - Recommended)</option>
+                    <option value="kimi-k2.5-thinking" className="bg-gray-900 text-white">Kimi K2.5 Thinking (Reasoning)</option>
+                    <option value="kimi-k2" className="bg-gray-900 text-white">Kimi K2</option>
+                  </>
+                )}
               </select>
             </div>
           </div>
@@ -405,11 +465,11 @@ export default function BuilderPage() {
               <select
                 value={fioriTheme}
                 onChange={(e) => setFioriTheme(e.target.value)}
-                className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-white focus:outline-none focus:border-blue-500 transition-colors"
+                className="w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-xl text-white focus:outline-none focus:border-blue-500 transition-colors"
               >
-                <option value="sap_horizon">SAP Horizon (Modern)</option>
-                <option value="sap_fiori_3">SAP Fiori 3</option>
-                <option value="sap_belize">SAP Belize</option>
+                <option value="sap_horizon" className="bg-gray-900 text-white">SAP Horizon (Modern)</option>
+                <option value="sap_fiori_3" className="bg-gray-900 text-white">SAP Fiori 3</option>
+                <option value="sap_belize" className="bg-gray-900 text-white">SAP Belize</option>
               </select>
             </div>
 
@@ -443,10 +503,10 @@ export default function BuilderPage() {
               <select
                 value={authType}
                 onChange={(e) => setAuthType(e.target.value)}
-                className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-white focus:outline-none focus:border-blue-500 transition-colors"
+                className="w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-xl text-white focus:outline-none focus:border-blue-500 transition-colors"
               >
-                <option value="mock">Mock (Development)</option>
-                <option value="xsuaa">XSUAA (SAP BTP)</option>
+                <option value="mock" className="bg-gray-900 text-white">Mock (Development)</option>
+                <option value="xsuaa" className="bg-gray-900 text-white">XSUAA (SAP BTP)</option>
               </select>
             </div>
 
