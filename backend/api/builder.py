@@ -163,6 +163,83 @@ async def start_generation(
         )
 
 
+@router.get("/{session_id}/generate/stream")
+async def stream_generation(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Stream the generation progress for a session using SSE.
+    """
+    import json
+    from backend.agents.graph import run_generation_workflow_streaming
+    
+    # Get session
+    result = await db.execute(select(Session).where(Session.id == session_id))
+    session = result.scalar_one_or_none()
+    
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {session_id} not found",
+        )
+
+    # Initial state
+    initial_state = create_initial_state(
+        session_id=session.id,
+        project_name=session.project_name,
+        project_namespace=session.project_namespace or "",
+        project_description=session.project_description or "",
+    )
+    initial_state.update(session.configuration or {})
+
+    async def event_generator():
+        yield f"data: {json.dumps({'type': 'connected', 'session_id': session_id})}\n\n"
+        try:
+            async for event in run_generation_workflow_streaming(initial_state):
+                # Update session state in DB for each major update
+                if event["type"] in ["agent_complete", "workflow_complete"]:
+                    # Refetch session in this generator scope if needed, but for now we update via db session
+                    # Note: We might need a separate db session for the generator if it lasts long
+                    pass 
+                
+                yield f"data: {json.dumps(event)}\n\n"
+                
+                if event["type"] == "workflow_complete":
+                    # Update final session state
+                    res = await db.execute(select(Session).where(Session.id == session_id))
+                    s = res.scalar_one()
+                    
+                    final_state = event.get("final_state", {})
+                    
+                    s.status = final_state.get("generation_status", "completed")
+                    s.configuration = {
+                        **(s.configuration or {}),
+                        "entities": final_state.get("entities", []),
+                        "relationships": final_state.get("relationships", []),
+                        "business_rules": final_state.get("business_rules", []),
+                        "artifacts_db": final_state.get("artifacts_db", []),
+                        "artifacts_srv": final_state.get("artifacts_srv", []),
+                        "artifacts_app": final_state.get("artifacts_app", []),
+                        "artifacts_deployment": final_state.get("artifacts_deployment", []),
+                        "artifacts_docs": final_state.get("artifacts_docs", []),
+                        "agent_history": final_state.get("agent_history", []),
+                        "validation_errors": final_state.get("validation_errors", []),
+                    }
+                    s.completed_at = datetime.utcnow()
+                    await db.commit()
+                    logger.info(f"Streaming generation completed and saved for session {session_id}")
+                    break
+        except Exception as e:
+            logger.error(f"Streaming failed: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream"
+    )
+
+
 @router.get("/{session_id}/status", response_model=GenerationStatus)
 async def get_generation_status(
     session_id: str,
@@ -179,6 +256,67 @@ async def get_generation_status(
         )
     
     config = session.configuration or {}
+    
+    return GenerationStatus(
+        session_id=session_id,
+        status=session.status,
+        current_agent=config.get("current_agent"),
+        agent_history=config.get("agent_history", []),
+        validation_errors=config.get("validation_errors", []),
+        started_at=config.get("generation_started_at"),
+        completed_at=config.get("generation_completed_at"),
+    )
+
+
+class UpdateArtifactRequest(BaseModel):
+    """Request to update artifact content."""
+    path: str
+    content: str
+
+
+@router.put("/{session_id}/artifacts", response_model=GenerationStatus)
+async def update_artifacts(
+    session_id: str,
+    request: UpdateArtifactRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Update a generated artifact for a session.
+    
+    Allows users to modify generated code before downloading.
+    """
+    # Get session
+    result = await db.execute(select(Session).where(Session.id == session_id))
+    session = result.scalar_one_or_none()
+    
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {session_id} not found",
+        )
+    
+    config = session.configuration or {}
+    updated = False
+    
+    # Search for artifact in all categories
+    for category in ["artifacts_db", "artifacts_srv", "artifacts_app", "artifacts_deployment", "artifacts_docs"]:
+        artifacts = config.get(category, [])
+        for art in artifacts:
+            if art["path"] == request.path:
+                art["content"] = request.content
+                updated = True
+                break
+        if updated:
+            break
+            
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Artifact {request.path} not found in session {session_id}",
+        )
+        
+    session.configuration = config
+    await db.commit()
     
     return GenerationStatus(
         session_id=session_id,

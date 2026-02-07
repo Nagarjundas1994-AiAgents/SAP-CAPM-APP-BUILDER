@@ -109,9 +109,10 @@ async def get_config():
 # Import and include API routers
 # =============================================================================
 
-from backend.api import sessions, builder
+from backend.api import sessions, builder, plan
 app.include_router(sessions.router, prefix="/api/sessions", tags=["sessions"])
 app.include_router(builder.router, prefix="/api/builder", tags=["builder"])
+app.include_router(plan.router, prefix="/api/builder", tags=["plan"])
 
 
 # =============================================================================

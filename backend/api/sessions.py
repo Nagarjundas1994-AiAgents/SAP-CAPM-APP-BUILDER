@@ -25,7 +25,7 @@ router = APIRouter()
 
 class SessionCreate(BaseModel):
     """Request to create a new builder session."""
-    project_name: str = Field(..., min_length=3, max_length=50)
+    project_name: str = Field(..., min_length=3, max_length=100)
     project_namespace: str | None = None
     project_description: str | None = None
     user_email: str = Field(default="demo@example.com")

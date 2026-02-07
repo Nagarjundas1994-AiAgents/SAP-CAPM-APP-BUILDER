@@ -4,15 +4,24 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import WizardLayout from '@/components/WizardLayout';
 import AgentProgress from '@/components/AgentProgress';
+import PlanReview from '@/components/PlanReview';
+import ArtifactEditor from '@/components/ArtifactEditor';
+import { FioriPreview } from '@/components/FioriPreview';
 import {
   createSession,
   updateSession,
   startGeneration,
   getArtifacts,
   getDownloadUrl,
+  generatePlan,
+  updatePlan,
+  approvePlan,
+  getGenerationStreamUrl,
+  updateArtifact,
   Session,
   GenerationResult,
   AgentExecution,
+  ImplementationPlan,
 } from '@/lib/api';
 import {
   Briefcase,
@@ -27,9 +36,12 @@ import {
   FileCode,
   FolderTree,
   CheckCircle2,
+  Edit3,
+  Layout,
+  ArrowRight,
 } from 'lucide-react';
 
-// Wizard steps
+// Wizard steps - now includes Plan Review
 const STEPS = [
   { id: 0, name: 'Project Setup', shortName: 'Project' },
   { id: 1, name: 'Business Domain', shortName: 'Domain' },
@@ -37,8 +49,9 @@ const STEPS = [
   { id: 3, name: 'Services & APIs', shortName: 'Services' },
   { id: 4, name: 'Fiori UI', shortName: 'UI' },
   { id: 5, name: 'Security', shortName: 'Security' },
-  { id: 6, name: 'Review & Generate', shortName: 'Generate' },
-  { id: 7, name: 'Download', shortName: 'Download' },
+  { id: 6, name: 'Review Plan', shortName: 'Plan' },
+  { id: 7, name: 'Generate', shortName: 'Generate' },
+  { id: 8, name: 'Download', shortName: 'Download' },
 ];
 
 // Agent definitions
@@ -67,9 +80,13 @@ export default function BuilderPage() {
   const [currentStep, setCurrentStep] = useState(0);
   const [session, setSession] = useState<Session | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isLoadingPlan, setIsLoadingPlan] = useState(false);
+  const [plan, setPlan] = useState<ImplementationPlan | null>(null);
   const [agentHistory, setAgentHistory] = useState<AgentExecution[]>([]);
   const [currentAgent, setCurrentAgent] = useState<string | null>(null);
   const [result, setResult] = useState<GenerationResult | null>(null);
+  const [showArtifactEditor, setShowArtifactEditor] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
 
   // Form state
   const [projectName, setProjectName] = useState('');
@@ -81,6 +98,7 @@ export default function BuilderPage() {
   const [llmProvider, setLlmProvider] = useState('openai');
   const [llmModel, setLlmModel] = useState('gpt-5.2');
   const [fioriTheme, setFioriTheme] = useState('sap_horizon');
+  const [fioriMainEntity, setFioriMainEntity] = useState<string>('');
   const [authType, setAuthType] = useState('mock');
 
   // Validation
@@ -97,8 +115,10 @@ export default function BuilderPage() {
       case 5:
         return true;
       case 6:
-        return !isGenerating;
+        return plan !== null && plan.approved;
       case 7:
+        return !isGenerating;
+      case 8:
         return result !== null;
       default:
         return true;
@@ -144,8 +164,36 @@ export default function BuilderPage() {
       }
     }
 
-    if (currentStep === 6) {
-      // Start generation
+    if (currentStep === 5 && !plan) {
+      // Generate implementation plan when moving to Plan Review
+      try {
+        setIsLoadingPlan(true);
+        // First update session with current configuration
+        if (session) {
+          await updateSession(session.id, {
+            configuration: {
+              domain: selectedDomain,
+              entities: entities.map((name) => ({ name, fields: [] })),
+              llm_provider: llmProvider,
+              llm_model: llmModel,
+              fiori_theme: fioriTheme,
+              auth_type: authType,
+              fiori_main_entity: entities[0] || 'Entity',
+            },
+          });
+          const generatedPlan = await generatePlan(session.id);
+          setPlan(generatedPlan);
+        }
+      } catch (error) {
+        console.error('Failed to generate plan:', error);
+        return;
+      } finally {
+        setIsLoadingPlan(false);
+      }
+    }
+
+    if (currentStep === 7) {
+      // Start generation (plan is already approved)
       await handleGenerate();
     } else if (currentStep < STEPS.length - 1) {
       setCurrentStep(currentStep + 1);
@@ -159,7 +207,7 @@ export default function BuilderPage() {
     }
   };
 
-  // Handle generation
+  // Handle generation using streaming SSE
   const handleGenerate = async () => {
     if (!session) return;
 
@@ -168,37 +216,115 @@ export default function BuilderPage() {
     setCurrentAgent('requirements');
 
     try {
-      // Update session with all configuration
-      await updateSession(session.id, {
-        configuration: {
-          domain: selectedDomain,
-          entities: entities.map((name) => ({ name, fields: [] })),
-          llm_provider: llmProvider,
-          llm_model: llmModel,
-          fiori_theme: fioriTheme,
-          auth_type: authType,
-          fiori_main_entity: entities[0] || 'Entity',
-        },
-      });
+      // Create EventSource connection
+      const streamUrl = getGenerationStreamUrl(session.id);
+      const eventSource = new EventSource(streamUrl);
 
-      // Start generation
-      const status = await startGeneration(session.id, {
-        llm_provider: llmProvider,
-        llm_model: llmModel,
-      });
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          console.log('Stream event:', data.type, data);
+          
+          if (data.type === 'connected') {
+            console.log('Stream connected for session:', data.session_id);
+          } else if (data.type === 'agent_complete') {
+            setAgentHistory(data.agent_history);
+            // Set next agent as current if available
+            const currentIndex = AGENTS.findIndex(a => a.name === data.agent);
+            if (currentIndex !== -1 && currentIndex < AGENTS.length - 1) {
+              setCurrentAgent(AGENTS[currentIndex + 1].name);
+            } else {
+              setCurrentAgent(null);
+            }
+          } else if (data.type === 'workflow_complete') {
+            console.log('Workflow complete, closing stream');
+            eventSource.close(); // Close immediately to avoid onerror triggering on server close
+            setAgentHistory(data.agent_history);
+            setCurrentAgent(null);
+            
+            // Get artifacts after completion
+            getArtifacts(session.id).then(artifacts => {
+              setResult(artifacts);
+              setCurrentStep(8); // Go to download step
+            });
+          } else if (data.type === 'workflow_error' || data.type === 'error') {
+            console.error('Generation failed:', data.error || data.message);
+            eventSource.close();
+            setIsGenerating(false);
+          }
+        } catch (e) {
+          console.error('Failed to parse stream event:', e);
+        }
+      };
 
-      setAgentHistory(status.agent_history);
-      setCurrentAgent(null);
-
-      // Get artifacts
-      const artifacts = await getArtifacts(session.id);
-      setResult(artifacts);
-
-      setCurrentStep(7); // Go to download step
+      eventSource.onerror = (error) => {
+        // SSE often triggers error on normal closure if not closed by client first
+        if (eventSource.readyState === EventSource.CLOSED) {
+          console.log('Stream closed normally');
+        } else {
+          console.error('EventSource encountered an error:', error);
+          eventSource.close();
+          setIsGenerating(false);
+          // Don't show error if we already completed (transitioned to step 8)
+        }
+      };
     } catch (error) {
-      console.error('Generation failed:', error);
-    } finally {
+      console.error('Streaming generation failed:', error);
       setIsGenerating(false);
+    }
+  };
+
+  // Handle plan update
+  const handlePlanUpdate = async (updates: Partial<ImplementationPlan>) => {
+    if (!session || !plan) return;
+    try {
+      const updatedPlan = await updatePlan(session.id, updates as any);
+      setPlan(updatedPlan);
+    } catch (error) {
+      console.error('Failed to update plan:', error);
+    }
+  };
+
+  // Handle plan approval
+  const handlePlanApprove = async () => {
+    if (!session) return;
+    try {
+      setIsLoadingPlan(true);
+      const approvedPlan = await approvePlan(session.id);
+      setPlan(approvedPlan);
+      if (approvedPlan.entities.length > 0) {
+        setFioriMainEntity(approvedPlan.entities[0].name);
+      }
+      setCurrentStep(currentStep + 1); // Go to Generate step
+    } catch (error) {
+      console.error('Failed to approve plan:', error);
+    } finally {
+      setIsLoadingPlan(false);
+    }
+  };
+
+  // Handle plan regeneration
+  const handlePlanRegenerate = async () => {
+    if (!session) return;
+    try {
+      setIsLoadingPlan(true);
+      const newPlan = await generatePlan(session.id);
+      setPlan(newPlan);
+    } catch (error) {
+      console.error('Failed to regenerate plan:', error);
+    } finally {
+      setIsLoadingPlan(false);
+    }
+  };
+
+  // Handle artifact save
+  const handleArtifactSave = async (path: string, content: string) => {
+    if (!session) return;
+    try {
+      await updateArtifact(session.id, path, content);
+    } catch (error) {
+      console.error('Failed to update artifact:', error);
+      throw error;
     }
   };
 
@@ -527,12 +653,56 @@ export default function BuilderPage() {
           </div>
         );
 
-      // Step 6: Generate
+      // Step 6: Plan Review
       case 6:
         return (
           <div className="space-y-6">
-            {!isGenerating ? (
-              <>
+            {isLoadingPlan ? (
+              <div className="flex flex-col items-center justify-center py-12">
+                <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+                <p className="text-gray-400">Generating implementation plan...</p>
+              </div>
+            ) : plan ? (
+              <PlanReview
+                plan={plan}
+                onUpdate={handlePlanUpdate}
+                onApprove={handlePlanApprove}
+                onRegenerate={handlePlanRegenerate}
+                isLoading={isLoadingPlan}
+              />
+            ) : (
+              <div className="text-center py-12">
+                <p className="text-red-400">Failed to load plan. Please go back and try again.</p>
+              </div>
+            )}
+          </div>
+        );
+
+      // Step 7: Generate
+      case 7:
+        return (
+          <div className="space-y-6">
+            {isGenerating ? (
+              <div className="grid lg:grid-cols-2 gap-8 items-start">
+                <AgentProgress
+                  agents={AGENTS}
+                  executions={agentHistory}
+                  currentAgent={currentAgent}
+                />
+                <div className="hidden lg:block">
+                  <div className="mb-3 flex items-center gap-2 text-sm text-gray-400">
+                    <Layout className="w-4 h-4 text-blue-400" />
+                    <span>Real-time App Preview</span>
+                  </div>
+                  <FioriPreview 
+                    entities={plan?.entities || []} 
+                    mainEntityName={fioriMainEntity} 
+                    projectName={projectName} 
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-6">
                 <div className="text-center py-8">
                   <Rocket className="w-16 h-16 text-blue-400 mx-auto mb-4" />
                   <h2 className="text-xl font-bold text-white mb-2">
@@ -544,33 +714,38 @@ export default function BuilderPage() {
                 </div>
 
                 {/* Summary */}
-                <div className="grid md:grid-cols-3 gap-4">
-                  <div className="p-4 bg-white/5 rounded-xl text-center">
+                <div className="grid md:grid-cols-3 gap-4 mb-8">
+                  <div className="p-4 bg-white/5 rounded-xl text-center border border-white/5">
                     <div className="text-2xl font-bold text-white">{entities.length}</div>
                     <div className="text-sm text-gray-400">Entities</div>
                   </div>
-                  <div className="p-4 bg-white/5 rounded-xl text-center">
+                  <div className="p-4 bg-white/5 rounded-xl text-center border border-white/5">
                     <div className="text-2xl font-bold text-white">9</div>
                     <div className="text-sm text-gray-400">AI Agents</div>
                   </div>
-                  <div className="p-4 bg-white/5 rounded-xl text-center">
+                  <div className="p-4 bg-white/5 rounded-xl text-center border border-white/5">
                     <div className="text-2xl font-bold text-white">~20</div>
                     <div className="text-sm text-gray-400">Files</div>
                   </div>
                 </div>
-              </>
-            ) : (
-              <AgentProgress
-                agents={AGENTS}
-                executions={agentHistory}
-                currentAgent={currentAgent}
-              />
+
+                <div className="flex justify-center">
+                  <button
+                    onClick={handleGenerate}
+                    className="flex items-center gap-3 px-10 py-5 bg-gradient-to-r from-blue-600 to-blue-500 rounded-2xl font-bold text-white hover:from-blue-500 hover:to-blue-400 transition-all shadow-xl shadow-blue-500/25 group scale-105 hover:scale-110 active:scale-100"
+                  >
+                    <Rocket className="w-6 h-6 group-hover:rotate-12 transition-transform" />
+                    <span>Generate App</span>
+                    <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
+                  </button>
+                </div>
+              </div>
             )}
           </div>
         );
 
-      // Step 7: Download
-      case 7:
+      // Step 8: Download
+      case 8:
         return (
           <div className="space-y-6">
             <div className="text-center py-8">
@@ -583,38 +758,99 @@ export default function BuilderPage() {
               </p>
             </div>
 
-            {/* File breakdown */}
-            {result && (
-              <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {[
-                  { name: 'Database', count: result.artifacts_db.length, icon: Database },
-                  { name: 'Services', count: result.artifacts_srv.length, icon: Server },
-                  { name: 'UI', count: result.artifacts_app.length, icon: Palette },
-                  { name: 'Deployment', count: result.artifacts_deployment.length, icon: Rocket },
-                  { name: 'Docs', count: result.artifacts_docs.length, icon: FileCode },
-                ].map((cat) => (
-                  <div key={cat.name} className="p-4 bg-white/5 rounded-xl">
-                    <div className="flex items-center gap-3">
-                      <cat.icon className="w-5 h-5 text-blue-400" />
-                      <span className="text-white">{cat.name}</span>
-                      <span className="ml-auto text-gray-400">{cat.count} files</span>
-                    </div>
+            {/* Tabbed View: Files vs Preview */}
+            <div className="flex justify-center mb-6">
+              <div className="flex bg-white/5 p-1 rounded-xl border border-white/10">
+                <button
+                  onClick={() => setShowPreview(false)}
+                  className={`px-6 py-2 rounded-lg text-sm font-medium transition-all ${
+                    !showPreview ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <FileCode className="w-4 h-4" />
+                    Artifacts
                   </div>
-                ))}
+                </button>
+                <button
+                  onClick={() => setShowPreview(true)}
+                  className={`px-6 py-2 rounded-lg text-sm font-medium transition-all ${
+                    showPreview ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Layout className="w-4 h-4" />
+                    App Preview
+                  </div>
+                </button>
+              </div>
+            </div>
+
+            {/* File breakdown / Preview */}
+            {result && (
+              <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+                {!showPreview ? (
+                  <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {[
+                      { name: 'Database', count: result.artifacts_db.length, icon: Database },
+                      { name: 'Services', count: result.artifacts_srv.length, icon: Server },
+                      { name: 'UI', count: result.artifacts_app.length, icon: Palette },
+                      { name: 'Deployment', count: result.artifacts_deployment.length, icon: Rocket },
+                      { name: 'Docs', count: result.artifacts_docs.length, icon: FileCode },
+                    ].map((cat) => (
+                      <div key={cat.name} className="p-4 bg-white/5 rounded-xl">
+                        <div className="flex items-center gap-3">
+                          <cat.icon className="w-5 h-5 text-blue-400" />
+                          <span className="text-white">{cat.name}</span>
+                          <span className="ml-auto text-gray-400">{cat.count} files</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="max-w-5xl mx-auto">
+                    <FioriPreview 
+                      entities={plan?.entities || []} 
+                      mainEntityName={fioriMainEntity} 
+                      projectName={projectName} 
+                    />
+                  </div>
+                )}
               </div>
             )}
 
             {/* Download button */}
             {session && (
-              <div className="text-center pt-4">
-                <a
-                  href={getDownloadUrl(session.id)}
-                  className="inline-flex items-center gap-2 px-8 py-4 bg-gradient-to-r from-green-600 to-green-500 rounded-xl font-semibold text-white hover:from-green-500 hover:to-green-400 transition-all shadow-lg shadow-green-500/25"
-                >
-                  <Download className="w-5 h-5" />
-                  Download Project ZIP
-                </a>
+              <div className="flex flex-col items-center gap-4 pt-4">
+                <div className="flex items-center gap-4">
+                  <button
+                    onClick={() => setShowArtifactEditor(true)}
+                    className="flex items-center gap-2 px-6 py-4 bg-white/5 border border-white/10 rounded-xl font-medium text-white hover:bg-white/10 transition-all"
+                  >
+                    <Edit3 className="w-5 h-5 text-blue-400" />
+                    Review & Edit Files
+                  </button>
+                  <a
+                    href={getDownloadUrl(session.id)}
+                    className="inline-flex items-center gap-2 px-8 py-4 bg-gradient-to-r from-green-600 to-green-500 rounded-xl font-semibold text-white hover:from-green-500 hover:to-green-400 transition-all shadow-lg shadow-green-500/25"
+                  >
+                    <Download className="w-5 h-5" />
+                    Download Project ZIP
+                  </a>
+                </div>
+                <p className="text-xs text-gray-500 italic">
+                  Tip: You can modify the generated code above before downloading.
+                </p>
               </div>
+            )}
+
+            {/* Artifact Editor Modal */}
+            {showArtifactEditor && result && (
+              <ArtifactEditor
+                result={result}
+                onSave={handleArtifactSave}
+                onClose={() => setShowArtifactEditor(false)}
+              />
             )}
           </div>
         );

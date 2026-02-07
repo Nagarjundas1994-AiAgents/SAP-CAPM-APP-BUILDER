@@ -172,3 +172,71 @@ async def run_generation_workflow(initial_state: BuilderState) -> BuilderState:
             "severity": "error",
         }]
         raise
+
+
+async def run_generation_workflow_streaming(initial_state: BuilderState):
+    """
+    Run the generation workflow with streaming updates.
+    
+    Yields progress updates after each agent completes.
+    
+    Args:
+        initial_state: Initial BuilderState with user configuration
+        
+    Yields:
+        Dict with agent name, status, and partial state
+    """
+    logger.info(f"Starting streaming workflow for project: {initial_state.get('project_name')}")
+    
+    # Set generation status
+    initial_state["generation_status"] = GenerationStatus.IN_PROGRESS.value
+    initial_state["generation_started_at"] = datetime.utcnow().isoformat()
+    
+    # Get compiled graph
+    graph = get_builder_graph()
+    
+    current_state = initial_state
+    
+    try:
+        # Use astream to get updates after each node
+        async for event in graph.astream(initial_state):
+            # event is a dict with node_name: updated_state
+            for node_name, node_state in event.items():
+                current_state = node_state
+                
+                # Get latest agent execution from history
+                agent_history = node_state.get("agent_history", [])
+                latest_execution = agent_history[-1] if agent_history else None
+                
+                # Yield progress update
+                yield {
+                    "type": "agent_complete",
+                    "agent": node_name,
+                    "status": latest_execution.get("status") if latest_execution else "completed",
+                    "agent_history": agent_history,
+                    "validation_errors": node_state.get("validation_errors", []),
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+                
+        # Final completion event
+        yield {
+            "type": "workflow_complete",
+            "status": "completed",
+            "generation_status": current_state.get("generation_status", "completed"),
+            "agent_history": current_state.get("agent_history", []),
+            "validation_errors": current_state.get("validation_errors", []),
+            "final_state": current_state,  # Added final_state
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+        
+        logger.info("Streaming workflow completed")
+        
+    except Exception as e:
+        logger.error(f"Streaming workflow failed: {e}")
+        yield {
+            "type": "workflow_error",
+            "status": "failed",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+        raise

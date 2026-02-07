@@ -425,8 +425,8 @@ async def requirements_agent(state: BuilderState) -> BuilderState:
     # ==========================================================================
     domain_type = state.get("domain_type", DomainType.CUSTOM.value)
     
-    if domain_type in DOMAIN_TEMPLATES:
-        # Use pre-defined template
+    if domain_type in DOMAIN_TEMPLATES and not state.get("entities"):
+        # Use pre-defined template only if no entities already exist (e.g. from user approval)
         logger.info(f"Using domain template: {domain_type}")
         template = DOMAIN_TEMPLATES[domain_type]
         
