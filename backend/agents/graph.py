@@ -5,9 +5,10 @@ Defines the multi-agent workflow for generating SAP CAP + Fiori applications.
 Uses LangGraph StateGraph for stateful, deterministic execution.
 """
 
+import asyncio
 import logging
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Any
 
 from langgraph.graph import StateGraph, END
 
@@ -176,67 +177,133 @@ async def run_generation_workflow(initial_state: BuilderState) -> BuilderState:
 
 async def run_generation_workflow_streaming(initial_state: BuilderState):
     """
-    Run the generation workflow with streaming updates.
+    Run the generation workflow with REAL-TIME streaming updates.
     
-    Yields progress updates after each agent completes.
+    Uses an asyncio.Queue so that log_progress() calls inside agents
+    are pushed to the SSE endpoint immediately — not batched until
+    the agent finishes.
     
-    Args:
-        initial_state: Initial BuilderState with user configuration
-        
     Yields:
-        Dict with agent name, status, and partial state
+        Dict events: agent_start, agent_log, agent_complete, workflow_complete
     """
+    from backend.agents.progress import (
+        create_progress_queue,
+        remove_progress_queue,
+        push_event,
+    )
+
+    session_id = initial_state.get("session_id", "unknown")
     logger.info(f"Starting streaming workflow for project: {initial_state.get('project_name')}")
     
     # Set generation status
     initial_state["generation_status"] = GenerationStatus.IN_PROGRESS.value
     initial_state["generation_started_at"] = datetime.utcnow().isoformat()
     
+    # Create the real-time progress queue
+    queue = create_progress_queue(session_id)
+    
     # Get compiled graph
     graph = get_builder_graph()
     
-    current_state = initial_state
+    # Agent order for emitting agent_start events
+    AGENT_ORDER = [
+        "requirements", "data_modeling", "service_exposure",
+        "business_logic", "fiori_ui", "security",
+        "extension", "deployment", "validation",
+    ]
+    
+    final_state: dict[str, Any] = {}
+    workflow_error: Exception | None = None
+    
+    async def _run_graph():
+        """Run the LangGraph workflow in a background task."""
+        nonlocal final_state, workflow_error
+        try:
+            last_agent_idx = -1
+            async for event in graph.astream(initial_state):
+                for node_name, node_state in event.items():
+                    final_state = node_state
+                    
+                    # Emit agent_start for the NEXT agent if applicable
+                    agent_history = node_state.get("agent_history", [])
+                    latest = agent_history[-1] if agent_history else None
+                    
+                    if latest and latest.get("status") in ["completed", "failed"]:
+                        # Emit agent_complete
+                        await push_event(session_id, {
+                            "type": "agent_complete",
+                            "agent": node_name,
+                            "status": latest.get("status"),
+                            "agent_history": agent_history,
+                            "validation_errors": node_state.get("validation_errors", []),
+                            "timestamp": datetime.utcnow().isoformat(),
+                        })
+                        
+                        # Emit agent_start for next agent
+                        try:
+                            current_idx = AGENT_ORDER.index(node_name)
+                            if current_idx + 1 < len(AGENT_ORDER):
+                                next_agent = AGENT_ORDER[current_idx + 1]
+                                await push_event(session_id, {
+                                    "type": "agent_start",
+                                    "agent": next_agent,
+                                    "timestamp": datetime.utcnow().isoformat(),
+                                })
+                        except ValueError:
+                            pass
+            
+            # Workflow completed successfully
+            await push_event(session_id, {
+                "type": "workflow_complete",
+                "status": "completed",
+                "generation_status": final_state.get("generation_status", "completed"),
+                "agent_history": final_state.get("agent_history", []),
+                "validation_errors": final_state.get("validation_errors", []),
+                "final_state": final_state,
+                "timestamp": datetime.utcnow().isoformat(),
+            })
+        except Exception as e:
+            workflow_error = e
+            logger.error(f"Streaming workflow failed: {e}")
+            await push_event(session_id, {
+                "type": "workflow_error",
+                "status": "failed",
+                "error": str(e),
+                "timestamp": datetime.utcnow().isoformat(),
+            })
+        finally:
+            # Sentinel to signal the generator to stop
+            await push_event(session_id, {"type": "_done"})
+    
+    # Emit agent_start for the first agent
+    await push_event(session_id, {
+        "type": "agent_start",
+        "agent": AGENT_ORDER[0],
+        "timestamp": datetime.utcnow().isoformat(),
+    })
+    
+    # Start graph execution in the background
+    task = asyncio.create_task(_run_graph())
     
     try:
-        # Use astream to get updates after each node
-        async for event in graph.astream(initial_state):
-            # event is a dict with node_name: updated_state
-            for node_name, node_state in event.items():
-                current_state = node_state
-                
-                # Get latest agent execution from history
-                agent_history = node_state.get("agent_history", [])
-                latest_execution = agent_history[-1] if agent_history else None
-                
-                # Yield progress update
+        # Yield events from the queue in real-time
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=120.0)
+            except asyncio.TimeoutError:
+                # Keep-alive: prevent SSE connection from timing out
                 yield {
-                    "type": "agent_complete",
-                    "agent": node_name,
-                    "status": latest_execution.get("status") if latest_execution else "completed",
-                    "agent_history": agent_history,
-                    "validation_errors": node_state.get("validation_errors", []),
+                    "type": "heartbeat",
                     "timestamp": datetime.utcnow().isoformat(),
                 }
-                
-        # Final completion event
-        yield {
-            "type": "workflow_complete",
-            "status": "completed",
-            "generation_status": current_state.get("generation_status", "completed"),
-            "agent_history": current_state.get("agent_history", []),
-            "validation_errors": current_state.get("validation_errors", []),
-            "final_state": current_state,  # Added final_state
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-        
-        logger.info("Streaming workflow completed")
-        
-    except Exception as e:
-        logger.error(f"Streaming workflow failed: {e}")
-        yield {
-            "type": "workflow_error",
-            "status": "failed",
-            "error": str(e),
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-        raise
+                continue
+            
+            if event.get("type") == "_done":
+                break
+            
+            yield event
+    finally:
+        remove_progress_queue(session_id)
+        if not task.done():
+            task.cancel()
+

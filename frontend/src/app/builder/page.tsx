@@ -22,6 +22,7 @@ import {
   GenerationResult,
   AgentExecution,
   ImplementationPlan,
+  ValidationError,
 } from '@/lib/api';
 import {
   Briefcase,
@@ -87,6 +88,9 @@ export default function BuilderPage() {
   const [result, setResult] = useState<GenerationResult | null>(null);
   const [showArtifactEditor, setShowArtifactEditor] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
+  const [logs, setLogs] = useState<Record<string, string>>({});
+  const [activeTab, setActiveTab] = useState<'preview' | 'code' | 'logs'>('preview');
+  const [validationErrors, setValidationErrors] = useState<ValidationError[]>([]);
 
   // Form state
   const [projectName, setProjectName] = useState('');
@@ -214,6 +218,8 @@ export default function BuilderPage() {
     setIsGenerating(true);
     setAgentHistory([]);
     setCurrentAgent('requirements');
+    setLogs({});
+    setValidationErrors([]);
 
     try {
       // Create EventSource connection
@@ -227,18 +233,33 @@ export default function BuilderPage() {
           
           if (data.type === 'connected') {
             console.log('Stream connected for session:', data.session_id);
+          } else if (data.type === 'agent_start') {
+            setCurrentAgent(data.agent);
+          } else if (data.type === 'agent_log') {
+            setLogs(prev => ({
+              ...prev,
+              [data.agent]: (prev[data.agent] || '') + `[${new Date(data.timestamp).toLocaleTimeString()}] ${data.message}\n`
+            }));
           } else if (data.type === 'agent_complete') {
             setAgentHistory(data.agent_history);
+            setValidationErrors(data.validation_errors || []);
+            
             // Set next agent as current if available
             const currentIndex = AGENTS.findIndex(a => a.name === data.agent);
             if (currentIndex !== -1 && currentIndex < AGENTS.length - 1) {
-              setCurrentAgent(AGENTS[currentIndex + 1].name);
+              const nextPending = data.agent_history.find((a: any) => a.status === 'pending');
+              if (nextPending) {
+                setCurrentAgent(nextPending.agent_name);
+              } else {
+                // FALLBACK: use hardcoded order if pending not found in history
+                setCurrentAgent(AGENTS[currentIndex + 1].name);
+              }
             } else {
               setCurrentAgent(null);
             }
           } else if (data.type === 'workflow_complete') {
             console.log('Workflow complete, closing stream');
-            eventSource.close(); // Close immediately to avoid onerror triggering on server close
+            eventSource.close();
             setAgentHistory(data.agent_history);
             setCurrentAgent(null);
             
@@ -258,14 +279,12 @@ export default function BuilderPage() {
       };
 
       eventSource.onerror = (error) => {
-        // SSE often triggers error on normal closure if not closed by client first
         if (eventSource.readyState === EventSource.CLOSED) {
           console.log('Stream closed normally');
         } else {
           console.error('EventSource encountered an error:', error);
           eventSource.close();
           setIsGenerating(false);
-          // Don't show error if we already completed (transitioned to step 8)
         }
       };
     } catch (error) {
@@ -688,6 +707,7 @@ export default function BuilderPage() {
                   agents={AGENTS}
                   executions={agentHistory}
                   currentAgent={currentAgent}
+                  logs={logs}
                 />
                 <div className="hidden lg:block">
                   <div className="mb-3 flex items-center gap-2 text-sm text-gray-400">

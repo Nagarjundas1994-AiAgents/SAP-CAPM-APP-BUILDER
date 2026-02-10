@@ -3,19 +3,22 @@ Agent 8: Deployment & SAP BTP Agent
 
 Generates deployment configurations including mta.yaml, CI/CD pipelines,
 Docker files, and SAP BTP service bindings.
+
+Uses LLM to generate production-quality deployment configs with fallback to templates.
 """
 
 import logging
 import json
+import re
 from datetime import datetime
 from typing import Any
 
+from backend.agents.llm_providers import get_llm_manager
 from backend.agents.state import (
     BuilderState,
+    EntityDefinition,
     GeneratedFile,
     ValidationError,
-    DeploymentTarget,
-    CICDPlatform,
     DatabaseType,
     AuthType,
 )
@@ -24,184 +27,218 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# MTA Descriptor Generation
+# System Prompts for LLM
+# =============================================================================
+
+DEPLOYMENT_SYSTEM_PROMPT = """You are an expert SAP BTP deployment architect specializing in Cloud Foundry, MTA builds, and CI/CD pipelines.
+Your task is to generate production-ready deployment configurations for SAP CAP applications.
+
+STRICT RULES:
+1. mta.yaml must follow MTA specification 3.3+ with proper schema version
+2. Include modules for: srv (Node.js), db-deployer (hdb), app (html5), destination-content
+3. Include resources for: xsuaa, hana, destination, html5-repo-host, html5-repo-runtime
+4. Use proper build-parameters with builder types (npm, custom, hdb)
+5. Set up service binding requires/provides correctly
+6. GitHub Actions CI/CD must use SAP MTA build tool (mbt)
+7. Dockerfile should be multi-stage with node:18-alpine
+8. docker-compose.yml should orchestrate db + app services for local dev
+9. Include proper health checks and resource limits
+10. Follow SAP BTP deployment best practices
+
+OUTPUT FORMAT:
+Return your response as valid JSON:
+{
+  "mta_yaml": "... full content of mta.yaml ...",
+  "github_actions": "... full content of .github/workflows/deploy.yml ...",
+  "dockerfile": "... full content of Dockerfile ...",
+  "docker_compose": "... full content of docker-compose.yml ..."
+}
+
+Do NOT include markdown code fences in the JSON values. Return ONLY the JSON object."""
+
+
+DEPLOYMENT_GENERATION_PROMPT = """Generate deployment configuration for this SAP CAP project.
+
+Project Name: {project_name}
+Project Namespace: {namespace}
+Database Type: {database_type}
+Auth Type: {auth_type}
+
+Entities:
+{entities_json}
+
+Schema:
+```
+{schema_content}
+```
+
+Service:
+```
+{service_content}
+```
+
+Requirements:
+1. mta.yaml:
+   - ID: "{mta_id}"
+   - Schema version "3.3.0"
+   - srv module (nodejs, build with npm)
+   - db-deployer module (hdb or sqlite based on db type)
+   - App router / html5-deployer module  
+   - Resources: xsuaa, hana/sqlite service, destination, html5-repo
+   - Proper requires/provides chains between modules
+   - Build parameters with before-all npm install step
+
+2. GitHub Actions (.github/workflows/deploy.yml):
+   - Node.js 18 setup
+   - Install MTA build tool
+   - Run `mbt build`
+   - Deploy with `cf deploy`
+   - Environment variables for CF API, org, space
+   
+3. Dockerfile:
+   - Multi-stage build
+   - node:18-alpine base
+   - Copy package*.json, install deps, copy source
+   - Expose port 4004
+   - CMD ["npx", "cds", "run"]
+
+4. docker-compose.yml:
+   - App service with build context
+   - Database service (postgres for dev)
+   - Volume mounts for persistence
+   - Environment variables
+
+Respond with ONLY valid JSON."""
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+from backend.agents.progress import log_progress
+
+
+def _parse_llm_response(response_text: str) -> dict | None:
+    try:
+        text = response_text.strip()
+        if text.startswith("```json"):
+            text = text[7:]
+        if text.startswith("```"):
+            text = text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        return json.loads(text.strip())
+    except json.JSONDecodeError:
+        match = re.search(r'\{[\s\S]*\}', text)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                return None
+        return None
+
+
+# =============================================================================
+# Template Fallback Functions
 # =============================================================================
 
 def generate_mta_yaml(state: BuilderState) -> str:
-    """Generate mta.yaml for SAP BTP deployment."""
-    project_name = state.get("project_name", "app")
-    project_description = state.get("project_description", "")
-    database_type = state.get("database_type", DatabaseType.HANA.value)
-    auth_type = state.get("auth_type", AuthType.XSUAA.value)
-    fiori_main_entity = state.get("fiori_main_entity", "")
-    multitenancy = state.get("multitenancy_enabled", False)
-    
-    # Sanitize project name for MTA
+    project_name = state.get("project_name", "App")
     mta_id = project_name.lower().replace(" ", "-").replace("_", "-")
-    app_name = fiori_main_entity.lower() if fiori_main_entity else "app"
+    db_type = state.get("database_type", DatabaseType.SQLITE.value)
     
-    lines = []
-    lines.append(f"_schema-version: '3.2'")
-    lines.append(f"ID: {mta_id}")
-    lines.append(f"version: 1.0.0")
-    lines.append(f"description: \"{project_description or project_name}\"")
-    lines.append("")
-    lines.append("parameters:")
-    lines.append("  enable-parallel-deployments: true")
-    lines.append("")
-    lines.append("build-parameters:")
-    lines.append("  before-all:")
-    lines.append("    - builder: custom")
-    lines.append("      commands:")
-    lines.append("        - npm ci")
-    lines.append("        - npx cds build --production")
-    lines.append("")
-    lines.append("modules:")
-    lines.append("")
+    hana_service = "hana" if db_type == DatabaseType.HANA.value else "sqlite"
     
-    # CAP Server Module
-    lines.append(f"  - name: {mta_id}-srv")
-    lines.append("    type: nodejs")
-    lines.append("    path: gen/srv")
-    lines.append("    parameters:")
-    lines.append("      buildpack: nodejs_buildpack")
-    lines.append("      memory: 256M")
-    lines.append("      disk-quota: 1024M")
-    lines.append("    build-parameters:")
-    lines.append("      builder: npm")
-    lines.append("    provides:")
-    lines.append("      - name: srv-api")
-    lines.append("        properties:")
-    lines.append(f"          srv-url: ${{default-url}}")
-    lines.append("    requires:")
-    
-    # Database binding
-    if database_type == DatabaseType.HANA.value:
-        lines.append(f"      - name: {mta_id}-db")
-    
-    # Auth binding
-    if auth_type != AuthType.MOCK.value:
-        lines.append(f"      - name: {mta_id}-auth")
-    
-    lines.append("")
-    
-    # Database Deployer Module (HANA only)
-    if database_type == DatabaseType.HANA.value:
-        lines.append(f"  - name: {mta_id}-db-deployer")
-        lines.append("    type: hdb")
-        lines.append("    path: gen/db")
-        lines.append("    parameters:")
-        lines.append("      buildpack: nodejs_buildpack")
-        lines.append("    requires:")
-        lines.append(f"      - name: {mta_id}-db")
-        lines.append("")
-    
-    # App Router Module
-    lines.append(f"  - name: {mta_id}-app-router")
-    lines.append("    type: approuter.nodejs")
-    lines.append(f"    path: app/{app_name}")
-    lines.append("    parameters:")
-    lines.append("      memory: 256M")
-    lines.append("      disk-quota: 256M")
-    lines.append("    requires:")
-    lines.append("      - name: srv-api")
-    lines.append("        group: destinations")
-    lines.append("        properties:")
-    lines.append(f"          name: {mta_id}-srv")
-    lines.append("          url: ~{srv-url}")
-    lines.append("          forwardAuthToken: true")
-    
-    if auth_type != AuthType.MOCK.value:
-        lines.append(f"      - name: {mta_id}-auth")
-    
-    lines.append("")
-    lines.append("resources:")
-    lines.append("")
-    
-    # HANA Service
-    if database_type == DatabaseType.HANA.value:
-        lines.append(f"  - name: {mta_id}-db")
-        lines.append("    type: com.sap.xs.hdi-container")
-        lines.append("    parameters:")
-        lines.append("      service: hana")
-        lines.append("      service-plan: hdi-shared")
-        lines.append("")
-    
-    # XSUAA Service
-    if auth_type != AuthType.MOCK.value:
-        lines.append(f"  - name: {mta_id}-auth")
-        lines.append("    type: org.cloudfoundry.managed-service")
-        lines.append("    parameters:")
-        lines.append("      service: xsuaa")
-        lines.append("      service-plan: application")
-        lines.append("      path: ./xs-security.json")
-        lines.append("      config:")
-        lines.append(f"        xsappname: {mta_id}-${{org}}-${{space}}")
-        lines.append("        tenant-mode: dedicated")
-    
-    return "\n".join(lines)
+    mta = f"""_schema-version: '3.3.0'
+ID: {mta_id}
+version: 1.0.0
+description: {project_name} - SAP CAP Application
+
+parameters:
+  enable-parallel-deployments: true
+
+build-parameters:
+  before-all:
+    - builder: custom
+      commands:
+        - npm ci
+        - npx cds build --production
+
+modules:
+  - name: {mta_id}-srv
+    type: nodejs
+    path: gen/srv
+    parameters:
+      buildpack: nodejs_buildpack
+      memory: 256M
+      disk-quota: 512M
+    build-parameters:
+      builder: npm
+    provides:
+      - name: srv-api
+        properties:
+          srv-url: ${{default-url}}
+    requires:
+      - name: {mta_id}-auth
+      - name: {mta_id}-db
+
+  - name: {mta_id}-db-deployer
+    type: hdb
+    path: gen/db
+    parameters:
+      buildpack: nodejs_buildpack
+      memory: 256M
+    requires:
+      - name: {mta_id}-db
+
+resources:
+  - name: {mta_id}-auth
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: xsuaa
+      service-plan: application
+      path: ./xs-security.json
+
+  - name: {mta_id}-db
+    type: com.sap.xs.hdi-container
+    parameters:
+      service: {hana_service}
+      service-plan: hdi-shared
+"""
+    return mta
 
 
 def generate_github_actions(state: BuilderState) -> str:
-    """Generate GitHub Actions CI/CD pipeline."""
-    project_name = state.get("project_name", "app")
-    mta_id = project_name.lower().replace(" ", "-").replace("_", "-")
-    
-    return f"""name: Build and Deploy
+    project_name = state.get("project_name", "App")
+    return f"""name: Deploy {project_name}
 
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
-
-env:
-  MTA_ID: {mta_id}
+  workflow_dispatch:
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@v4
+      
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '18'
           cache: 'npm'
-
+      
       - name: Install dependencies
         run: npm ci
-
-      - name: Run tests
-        run: npm test
-
+      
+      - name: Install MTA Build Tool
+        run: npm install -g mbt
+      
       - name: Build MTA
-        run: |
-          npm install -g mbt
-          mbt build -t ./mta_archives
-
-      - name: Upload MTA archive
-        uses: actions/upload-artifact@v4
-        with:
-          name: mta-archive
-          path: mta_archives/*.mtar
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    
-    steps:
-      - name: Download MTA archive
-        uses: actions/download-artifact@v4
-        with:
-          name: mta-archive
-          path: mta_archives
-
-      - name: Deploy to SAP BTP
+        run: mbt build
+      
+      - name: Deploy to Cloud Foundry
         env:
           CF_API: ${{{{ secrets.CF_API }}}}
           CF_ORG: ${{{{ secrets.CF_ORG }}}}
@@ -209,85 +246,62 @@ jobs:
           CF_USER: ${{{{ secrets.CF_USER }}}}
           CF_PASSWORD: ${{{{ secrets.CF_PASSWORD }}}}
         run: |
-          wget -q -O cf-cli.tgz "https://packages.cloudfoundry.org/stable?release=linux64-binary&version=v8&source=github"
-          tar -xzf cf-cli.tgz
-          ./cf login -a $CF_API -u $CF_USER -p $CF_PASSWORD -o $CF_ORG -s $CF_SPACE
-          ./cf deploy mta_archives/*.mtar -f
+          npm install -g cf-cli
+          cf api $CF_API
+          cf auth $CF_USER $CF_PASSWORD
+          cf target -o $CF_ORG -s $CF_SPACE
+          cf deploy mta_archives/*.mtar
 """
 
 
 def generate_dockerfile(state: BuilderState) -> str:
-    """Generate Dockerfile for containerized deployment."""
-    return """# Build stage
-FROM node:20-alpine AS builder
-
+    return """# Multi-stage build for SAP CAP application
+FROM node:18-alpine AS builder
 WORKDIR /app
-
-# Copy package files
 COPY package*.json ./
-
-# Install dependencies
-RUN npm ci --only=production
-
-# Copy source
+RUN npm ci --production
 COPY . .
 
-# Build CDS
-RUN npx cds build --production
-
-# Production stage
-FROM node:20-alpine
-
+FROM node:18-alpine
 WORKDIR /app
-
-# Copy built files
-COPY --from=builder /app/gen ./gen
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package*.json ./
-
-# Set environment
-ENV NODE_ENV=production
-ENV PORT=4004
-
+COPY --from=builder /app .
 EXPOSE 4004
-
-# Start server
-CMD ["npm", "start"]
+ENV NODE_ENV=production
+CMD ["npx", "cds", "run", "--in-memory"]
 """
 
 
 def generate_docker_compose(state: BuilderState) -> str:
-    """Generate docker-compose.yml for local development."""
-    project_name = state.get("project_name", "app")
-    mta_id = project_name.lower().replace(" ", "-").replace("_", "-")
-    
+    project_name = state.get("project_name", "App")
+    service_name = project_name.lower().replace(" ", "-")
     return f"""version: '3.8'
 
 services:
-  {mta_id}-srv:
-    build:
-      context: .
-      dockerfile: Dockerfile
+  {service_name}-app:
+    build: .
     ports:
       - "4004:4004"
     environment:
       - NODE_ENV=development
-      - cds_requires_db_kind=sqlite
+      - CDS_REQUIRES_DB_KIND=sqlite
     volumes:
-      - .:/app
-      - /app/node_modules
-    command: npx cds watch
+      - ./db:/app/db
+      - ./srv:/app/srv
+    restart: unless-stopped
 
-  # Optional: Add HANA Express for local HANA testing
-  # hana-express:
-  #   image: saplabs/hanaexpress:2.00.054.00.20210603.1
-  #   hostname: hxe
-  #   ports:
-  #     - "39017:39017"
-  #     - "39041:39041"
-  #   environment:
-  #     - AGREE_TO_SAP_LICENSE=Y
-  #     - MASTER_PASSWORD=HXEHana1
+  {service_name}-db:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: {service_name}
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+    volumes:
+      - db-data:/var/lib/postgresql/data
+
+volumes:
+  db-data:
 """
 
 
@@ -297,98 +311,109 @@ services:
 
 async def deployment_agent(state: BuilderState) -> BuilderState:
     """
-    Deployment & SAP BTP Agent
+    Deployment & SAP BTP Agent (LLM-Driven)
     
-    Generates:
-    1. mta.yaml - MTA deployment descriptor
-    2. .github/workflows/deploy.yml - CI/CD pipeline
-    3. Dockerfile - Container image
-    4. docker-compose.yml - Local orchestration
-    
-    Returns updated state with deployment configuration files.
+    Uses LLM to generate production-quality deployment configurations.
+    Falls back to template-based generation if LLM fails.
     """
-    logger.info("Starting Deployment Agent")
+    logger.info("Starting Deployment Agent (LLM-Driven)")
     
     now = datetime.utcnow().isoformat()
     errors: list[ValidationError] = []
     generated_files: list[GeneratedFile] = []
     
-    # Update state
     state["current_agent"] = "deployment"
     state["updated_at"] = now
+    state["current_logs"] = []
     
-    deployment_target = state.get("deployment_target", DeploymentTarget.CF.value)
-    ci_cd_enabled = state.get("ci_cd_enabled", True)
-    ci_cd_platform = state.get("ci_cd_platform", CICDPlatform.GITHUB_ACTIONS.value)
-    docker_enabled = state.get("docker_enabled", True)
+    log_progress(state, "Starting deployment configuration generation...")
     
-    # ==========================================================================
-    # Generate mta.yaml
-    # ==========================================================================
-    if deployment_target in [DeploymentTarget.CF.value, DeploymentTarget.KYMA.value]:
-        try:
-            mta = generate_mta_yaml(state)
-            generated_files.append({
-                "path": "mta.yaml",
-                "content": mta,
-                "file_type": "yaml",
-            })
-            logger.info("Generated mta.yaml")
-        except Exception as e:
-            logger.error(f"Failed to generate mta.yaml: {e}")
-            errors.append({
-                "agent": "deployment",
-                "code": "MTA_GENERATION_ERROR",
-                "message": f"Failed to generate mta.yaml: {str(e)}",
-                "field": None,
-                "severity": "error",
-            })
+    project_name = state.get("project_name", "App")
+    namespace = state.get("project_namespace", "com.company.app")
+    database_type = state.get("database_type", DatabaseType.SQLITE.value)
+    auth_type = state.get("auth_type", AuthType.XSUAA.value)
+    entities = state.get("entities", [])
+    provider = state.get("llm_provider")
+    mta_id = project_name.lower().replace(" ", "-").replace("_", "-")
+    
+    schema_content = ""
+    service_content = ""
+    for artifact in state.get("artifacts_db", []):
+        if artifact.get("path") == "db/schema.cds":
+            schema_content = artifact.get("content", "")
+    for artifact in state.get("artifacts_srv", []):
+        if artifact.get("path") == "srv/service.cds":
+            service_content = artifact.get("content", "")
+    
+    llm_success = False
     
     # ==========================================================================
-    # Generate CI/CD Pipeline
+    # Attempt LLM-driven generation
     # ==========================================================================
-    if ci_cd_enabled:
-        try:
-            if ci_cd_platform == CICDPlatform.GITHUB_ACTIONS.value:
-                pipeline = generate_github_actions(state)
-                generated_files.append({
-                    "path": ".github/workflows/deploy.yml",
-                    "content": pipeline,
-                    "file_type": "yaml",
-                })
-                logger.info("Generated .github/workflows/deploy.yml")
-        except Exception as e:
-            logger.error(f"Failed to generate CI/CD pipeline: {e}")
-    
-    # ==========================================================================
-    # Generate Docker files
-    # ==========================================================================
-    if docker_enabled:
-        try:
-            dockerfile = generate_dockerfile(state)
-            generated_files.append({
-                "path": "Dockerfile",
-                "content": dockerfile,
-                "file_type": "dockerfile",
-            })
+    try:
+        llm_manager = get_llm_manager()
+        
+        prompt = DEPLOYMENT_GENERATION_PROMPT.format(
+            project_name=project_name,
+            namespace=namespace,
+            database_type=database_type,
+            auth_type=auth_type,
+            entities_json=json.dumps(entities, indent=2),
+            schema_content=schema_content or "(not available)",
+            service_content=service_content or "(not available)",
+            mta_id=mta_id,
+        )
+        
+        log_progress(state, "Calling LLM for deployment config generation...")
+        
+        response = await llm_manager.generate(
+            prompt=prompt,
+            system_prompt=DEPLOYMENT_SYSTEM_PROMPT,
+            provider=provider,
+            temperature=0.1,
+        )
+        
+        parsed = _parse_llm_response(response)
+        
+        if parsed and parsed.get("mta_yaml"):
+            generated_files.append({"path": "mta.yaml", "content": parsed["mta_yaml"], "file_type": "yaml"})
             
-            docker_compose = generate_docker_compose(state)
-            generated_files.append({
-                "path": "docker-compose.yml",
-                "content": docker_compose,
-                "file_type": "yaml",
-            })
-            logger.info("Generated Docker files")
+            if parsed.get("github_actions"):
+                generated_files.append({"path": ".github/workflows/deploy.yml", "content": parsed["github_actions"], "file_type": "yaml"})
+            if parsed.get("dockerfile"):
+                generated_files.append({"path": "Dockerfile", "content": parsed["dockerfile"], "file_type": "dockerfile"})
+            if parsed.get("docker_compose"):
+                generated_files.append({"path": "docker-compose.yml", "content": parsed["docker_compose"], "file_type": "yaml"})
+            
+            log_progress(state, "LLM-generated deployment config accepted.")
+            llm_success = True
+        else:
+            log_progress(state, "Could not parse LLM response. Falling back to template.")
+    
+    except Exception as e:
+        logger.warning(f"LLM generation failed for deployment: {e}")
+        log_progress(state, f"LLM call failed ({str(e)[:80]}). Falling back to template.")
+    
+    # ==========================================================================
+    # Fallback: Template-based generation
+    # ==========================================================================
+    if not llm_success:
+        log_progress(state, "Generating deployment config via template fallback...")
+        try:
+            generated_files.append({"path": "mta.yaml", "content": generate_mta_yaml(state), "file_type": "yaml"})
+            generated_files.append({"path": ".github/workflows/deploy.yml", "content": generate_github_actions(state), "file_type": "yaml"})
+            generated_files.append({"path": "Dockerfile", "content": generate_dockerfile(state), "file_type": "dockerfile"})
+            generated_files.append({"path": "docker-compose.yml", "content": generate_docker_compose(state), "file_type": "yaml"})
         except Exception as e:
-            logger.error(f"Failed to generate Docker files: {e}")
+            logger.error(f"Template fallback failed for deployment: {e}")
+            errors.append({"agent": "deployment", "code": "DEPLOYMENT_ERROR", "message": f"Deployment config failed: {str(e)}", "field": None, "severity": "error"})
     
     # ==========================================================================
     # Update state
     # ==========================================================================
-    state["artifacts_deployment"] = state.get("artifacts_deployment", []) + generated_files
+    state["artifacts_deploy"] = state.get("artifacts_deploy", []) + generated_files
     state["validation_errors"] = state.get("validation_errors", []) + errors
     
-    # Record execution
     state["agent_history"] = state.get("agent_history", []) + [{
         "agent_name": "deployment",
         "status": "completed" if not any(e["severity"] == "error" for e in errors) else "failed",
@@ -396,8 +421,11 @@ async def deployment_agent(state: BuilderState) -> BuilderState:
         "completed_at": datetime.utcnow().isoformat(),
         "duration_ms": None,
         "error": None,
+        "logs": state.get("current_logs", []),
     }]
     
-    logger.info(f"Deployment Agent completed. Generated {len(generated_files)} files.")
+    generation_method = "LLM" if llm_success else "template fallback"
+    log_progress(state, f"Deployment configuration complete ({generation_method}).")
+    logger.info(f"Deployment Agent completed via {generation_method}. Generated {len(generated_files)} files.")
     
     return state

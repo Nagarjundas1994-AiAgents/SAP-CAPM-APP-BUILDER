@@ -9,7 +9,7 @@
 [![SAP](https://img.shields.io/badge/SAP-CAP%20%2B%20Fiori-0FAAFF?style=for-the-badge&logo=sap&logoColor=white)](https://cap.cloud.sap)
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 
-**🤖 AI-powered platform for generating production-ready SAP CAPM + SAP Fiori applications using LangGraph multi-agent orchestration**
+**🤖 AI-powered platform that uses LLM-driven agents to generate production-ready SAP CAPM + SAP Fiori applications via LangGraph multi-agent orchestration**
 
 [Quick Start](#-quick-start) •
 [Architecture](#-architecture) •
@@ -23,15 +23,16 @@
 
 ## ✨ Features
 
-| Feature                        | Description                                               |
-| ------------------------------ | --------------------------------------------------------- |
-| 🤖 **9 Specialized AI Agents** | Each agent handles a specific aspect of SAP development   |
-| 🔄 **Multi-LLM Support**       | OpenAI GPT-5.2, Google Gemini 3, DeepSeek V3.2, Kimi K2.5 |
-| 🧙 **8-Step Wizard**           | Intuitive UI to configure and generate your app           |
-| 📦 **Complete SAP Project**    | CDS schemas, OData services, Fiori Elements UI            |
-| 🔐 **Security Configured**     | xs-security.json with roles and scopes                    |
-| 🚀 **Deployment Ready**        | mta.yaml for SAP BTP deployment                           |
-| 📚 **Auto Documentation**      | README and developer guides generated                     |
+| Feature                       | Description                                               |
+| ----------------------------- | --------------------------------------------------------- |
+| 🤖 **9 LLM-Driven AI Agents** | Each agent uses LLM calls to generate real SAP CAP code   |
+| 🔄 **Multi-LLM Support**      | OpenAI GPT-5.2, Google Gemini 3, DeepSeek V3.2, Kimi K2.5 |
+| 🧙 **8-Step Wizard**          | Intuitive UI to configure and generate your app           |
+| 📦 **Complete SAP Project**   | CDS schemas, OData services, Fiori Elements UI            |
+| 🔐 **Security Configured**    | xs-security.json with roles, scopes, and auth annotations |
+| 🚀 **Deployment Ready**       | mta.yaml, CI/CD pipelines, Docker configs                 |
+| 🛡️ **Robust Fallbacks**       | Template-based generation as fallback if LLM fails        |
+| 📚 **Auto Documentation**     | Compliance reports and extension guides generated         |
 
 ---
 
@@ -113,26 +114,44 @@
 ```
 📦 generated-sap-app/
 ├── 📁 db/                      # Database Layer
-│   ├── schema.cds              # CDS Entity Definitions
+│   ├── schema.cds              # CDS Entity Definitions (LLM-generated)
+│   ├── extensions.cds          # Extension Aspects (Clean Core)
 │   └── data/                   # Sample CSV Data
 │       ├── com.company-Entity1.csv
 │       └── com.company-Entity2.csv
 │
 ├── 📁 srv/                     # Service Layer
-│   ├── service.cds             # Service Definition
-│   ├── service.js              # Event Handlers
-│   └── annotations.cds         # OData Annotations
+│   ├── service.cds             # Service Definition (LLM-generated)
+│   ├── service.js              # Event Handlers with real business logic
+│   ├── annotations.cds         # OData/Fiori Annotations
+│   ├── auth.cds                # Authentication Config
+│   ├── auth-annotations.cds    # Authorization Restrictions
+│   └── lib/
+│       ├── utils.js             # Utility Functions
+│       └── hooks.js             # Extension Hook Registry
 │
-├── 📁 app/                     # UI Layer (Fiori Elements)
+├── 📁 app/{entity}/webapp/     # UI Layer (Fiori Elements)
 │   ├── manifest.json           # UI5 App Descriptor
-│   ├── webapp/
-│   │   ├── Component.js
-│   │   └── index.html
+│   ├── Component.js            # UI5 Component
+│   ├── index.html              # Standalone Entry Point
 │   └── i18n/
-│       └── i18n.properties
+│       └── i18n.properties     # Translations
+│
+├── 📁 docs/                    # Auto-Generated Docs
+│   ├── EXTENSION_GUIDE.md      # Extension Developer Guide
+│   └── COMPLIANCE_REPORT.md    # Validation Results
+│
+├── 📁 test/data/               # Test Data
+│   └── mock-users.csv          # Mock Users for Dev Testing
+│
+├── 📁 .github/workflows/       # CI/CD
+│   └── deploy.yml              # GitHub Actions Pipeline
 │
 ├── xs-security.json            # XSUAA Security Config
+├── .cdsrc.json                 # CDS Runtime Auth Config
 ├── mta.yaml                    # Multi-Target App Descriptor
+├── Dockerfile                  # Container Image
+├── docker-compose.yml          # Local Dev Orchestration
 ├── package.json                # Node.js Dependencies
 └── README.md                   # Generated Documentation
 ```
@@ -201,19 +220,60 @@ docker-compose down
 
 ## 🤖 AI Agents
 
+All agents are **LLM-driven** — each calls the configured LLM with expert SAP system prompts and project context to generate production-quality code. If an LLM call fails, every agent falls back to robust template-based generation.
+
 ### Agent Overview
 
-| #   | Agent                | Icon | Purpose                           | Output                     |
-| --- | -------------------- | ---- | --------------------------------- | -------------------------- |
-| 1   | **Requirements**     | 📝   | Analyze domain & extract entities | Entity list, relationships |
-| 2   | **Data Modeling**    | 🗃️   | Generate CDS schemas              | `db/schema.cds`            |
-| 3   | **Service Exposure** | 🌐   | Create OData services             | `srv/service.cds`          |
-| 4   | **Business Logic**   | 💼   | Write event handlers              | `srv/service.js`           |
-| 5   | **Fiori UI**         | 🎨   | Build Fiori Elements              | `app/manifest.json`        |
-| 6   | **Security**         | 🔐   | Configure authorization           | `xs-security.json`         |
-| 7   | **Extension**        | 🔧   | Add Clean Core hooks              | Extension points           |
-| 8   | **Deployment**       | 🚀   | Create deployment config          | `mta.yaml`                 |
-| 9   | **Validation**       | ✅   | SAP compliance check              | Validation report          |
+| #   | Agent                | Icon | LLM Generates                                                 |
+| --- | -------------------- | ---- | ------------------------------------------------------------- |
+| 1   | **Requirements**     | 📝   | Entity extraction, field inference, relationship mapping      |
+| 2   | **Data Modeling**    | 🗃️   | `db/schema.cds` with types, aspects, associations             |
+| 3   | **Service Exposure** | 🌐   | `srv/service.cds` + `srv/annotations.cds`                     |
+| 4   | **Business Logic**   | 💼   | `srv/service.js` with validations, calculations, side effects |
+| 5   | **Fiori UI**         | 🎨   | `manifest.json`, `Component.js`, `i18n`, `index.html`         |
+| 6   | **Security**         | 🔐   | `xs-security.json`, auth CDS, `.cdsrc.json`, mock users       |
+| 7   | **Extension**        | 🔧   | CDS aspects, hook registry, extension guide                   |
+| 8   | **Deployment**       | �    | `mta.yaml`, GitHub Actions, Dockerfile, docker-compose        |
+| 9   | **Validation**       | ✅   | Holistic LLM review + rule-based checks, compliance report    |
+
+### How LLM Generation Works
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    LLM-DRIVEN AGENT PATTERN                             │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  1. SYSTEM PROMPT         Expert SAP knowledge injected per agent       │
+│     ┌─────────────┐       (CDS syntax, Fiori best practices, etc.)      │
+│     │  SAP Expert  │                                                    │
+│     │  Knowledge   │                                                    │
+│     └──────┬──────┘                                                     │
+│            │                                                            │
+│  2. CONTEXT ASSEMBLY      Entities, relationships, business rules,      │
+│     ┌──────▼──────┐       previously generated schema/service artifacts │
+│     │  Project    │                                                     │
+│     │  Context    │                                                     │
+│     └──────┬──────┘                                                     │
+│            │                                                            │
+│  3. LLM CALL              generate() via configured provider            │
+│     ┌──────▼──────┐       (OpenAI / Gemini / DeepSeek / Kimi)           │
+│     │    LLM      │                                                     │
+│     │  Provider   │                                                     │
+│     └──────┬──────┘                                                     │
+│            │                                                            │
+│  4. PARSE & VALIDATE      JSON parsing, sanity checks on output         │
+│     ┌──────▼──────┐                                                     │
+│     │   Parse +   │──── ❌ On failure ────▶ TEMPLATE FALLBACK           │
+│     │  Validate   │                                                     │
+│     └──────┬──────┘                                                     │
+│            │ ✅                                                         │
+│  5. OUTPUT                Generated file(s) added to state              │
+│     ┌──────▼──────┐                                                     │
+│     │  Artifacts  │                                                     │
+│     └─────────────┘                                                     │
+│                                                                         │
+└──────────────────────────────────────────────────────────────────────────┘
+```
 
 ### Agent State Machine
 
@@ -275,19 +335,19 @@ docker-compose down
 ```
 sap-app-builder/
 ├── 📁 backend/
-│   ├── 📁 agents/              # LangGraph agents
+│   ├── 📁 agents/              # LLM-driven LangGraph agents
 │   │   ├── graph.py            # Agent orchestration graph
 │   │   ├── state.py            # Shared state definition
 │   │   ├── llm_providers.py    # Multi-LLM support
-│   │   ├── requirements.py     # Requirements analysis
-│   │   ├── data_modeling.py    # CDS schema generation
-│   │   ├── service_exposure.py # OData service
-│   │   ├── business_logic.py   # Event handlers
-│   │   ├── fiori_ui.py         # Fiori Elements
-│   │   ├── security.py         # XSUAA config
-│   │   ├── extension.py        # Clean Core
-│   │   ├── deployment.py       # MTA config
-│   │   └── validation.py       # SAP compliance
+│   │   ├── requirements.py     # Requirements analysis (LLM)
+│   │   ├── data_modeling.py    # CDS schema generation (LLM + fallback)
+│   │   ├── service_exposure.py # OData service (LLM + fallback)
+│   │   ├── business_logic.py   # Event handlers (LLM + fallback)
+│   │   ├── fiori_ui.py         # Fiori Elements (LLM + fallback)
+│   │   ├── security.py         # XSUAA config (LLM + fallback)
+│   │   ├── extension.py        # Clean Core (LLM + fallback)
+│   │   ├── deployment.py       # MTA config (LLM + fallback)
+│   │   └── validation.py       # LLM review + rule-based checks
 │   ├── 📁 api/                 # FastAPI routes
 │   │   ├── builder.py          # Generation endpoints
 │   │   └── sessions.py         # Session management

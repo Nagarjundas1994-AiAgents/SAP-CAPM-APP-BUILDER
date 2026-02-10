@@ -3,13 +3,17 @@ Agent 5: SAP Fiori UI Agent
 
 Generates Fiori Elements applications including manifest.json, i18n files,
 Component.js, and related configuration for List Report and Object Page apps.
+
+Uses LLM to generate production-quality Fiori configurations with fallback to templates.
 """
 
 import logging
 import json
+import re
 from datetime import datetime
 from typing import Any
 
+from backend.agents.llm_providers import get_llm_manager
 from backend.agents.state import (
     BuilderState,
     EntityDefinition,
@@ -24,11 +28,126 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Fiori Elements Generation
+# System Prompts for LLM
+# =============================================================================
+
+FIORI_SYSTEM_PROMPT = """You are an expert SAP Fiori Elements developer specializing in SAPUI5 and SAP Fiori Launchpad applications.
+Your task is to generate production-ready Fiori Elements configuration files.
+
+STRICT RULES:
+1. manifest.json must follow SAP UI5 manifest schema version 1.59.0+
+2. Use sap.fe.templates for Fiori Elements V4 templates
+3. Configure proper routing with ListReport and ObjectPage targets
+4. Use FlexibleColumnLayout where appropriate
+5. Set up proper data source configuration pointing to the OData service
+6. Component.js must extend sap.fe.core.AppComponent
+7. i18n.properties must include all entity and field labels with proper human-readable names
+8. Include proper device type support (desktop, tablet, phone)
+9. Set contentDensities for both compact and cozy modes
+10. Configure variant management at Page level
+11. For child entities, add sub-object page routes
+12. Use {i18n>key} syntax for translatable texts in manifest
+
+OUTPUT FORMAT:
+Return your response as valid JSON:
+{
+  "manifest_json": { ... complete manifest.json object ... },
+  "component_js": "... full Component.js content ...",
+  "i18n_properties": "... full i18n.properties content ...",
+  "index_html": "... full index.html content ..."
+}
+
+Do NOT include markdown code fences in the JSON values. Return ONLY the JSON object."""
+
+
+FIORI_GENERATION_PROMPT = """Generate a complete SAP Fiori Elements application configuration.
+
+Project Name: {project_name}
+Project Namespace: {namespace}
+Project Description: {description}
+Main Entity: {main_entity}
+App Type: {app_type}
+Theme: {theme}
+Layout Mode: {layout_mode}
+
+Service Definition:
+```
+{service_content}
+```
+
+Schema:
+```
+{schema_content}
+```
+
+Entities:
+{entities_json}
+
+Relationships:
+{relationships_json}
+
+Requirements:
+1. manifest.json:
+   - App ID: "{app_id}"
+   - Service URI: "/{service_path}/"
+   - OData V4 data source
+   - ListReport page for main entity "{main_entity}"
+   - ObjectPage for "{main_entity}" details
+   - Sub-ObjectPages for child entities (based on compositions/associations)
+   - FlexibleColumnLayout if layout_mode is "flexible_column"
+   - Proper navigation config between list and detail
+   
+2. Component.js:
+   - Extend sap.fe.core.AppComponent
+   - Use app ID "{app_id}"
+   
+3. i18n.properties:
+   - App title and description
+   - Labels for ALL entities and ALL fields (human-readable, Title Case)
+   - Common action labels (Create, Edit, Delete, Save, Cancel)
+   - Section labels for Object Page facets
+   
+4. index.html:
+   - Bootstrap with theme "{theme}"
+   - Resource roots pointing to app ID
+   - ComponentSupport for auto-instantiation
+
+Respond with ONLY valid JSON."""
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+from backend.agents.progress import log_progress
+
+
+def _parse_llm_response(response_text: str) -> dict | None:
+    try:
+        text = response_text.strip()
+        if text.startswith("```json"):
+            text = text[7:]
+        if text.startswith("```"):
+            text = text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        return json.loads(text.strip())
+    except json.JSONDecodeError:
+        match = re.search(r'\{[\s\S]*\}', text)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                return None
+        return None
+
+
+# =============================================================================
+# Template Fallback Functions
 # =============================================================================
 
 def generate_manifest_json(state: BuilderState) -> str:
-    """Generate the Fiori Elements manifest.json."""
+    """Generate the Fiori Elements manifest.json (template fallback)."""
     project_name = state.get("project_name", "App")
     namespace = state.get("project_namespace", "com.company.app")
     fiori_app_type = state.get("fiori_app_type", FioriAppType.LIST_REPORT.value)
@@ -36,20 +155,9 @@ def generate_manifest_json(state: BuilderState) -> str:
     fiori_theme = state.get("fiori_theme", FioriTheme.SAP_HORIZON.value)
     layout_mode = state.get("fiori_layout_mode", LayoutMode.FLEXIBLE_COLUMN.value)
     
-    # App ID
     app_id = f"{namespace}.{project_name.lower().replace('-', '').replace(' ', '')}"
-    
-    # Service name
     service_name = "".join(word.capitalize() for word in project_name.replace("-", " ").replace("_", " ").split())
     service_path = project_name.lower().replace(' ', '-')
-    
-    # Determine template based on app type
-    if fiori_app_type == FioriAppType.ANALYTICAL_LIST_PAGE.value:
-        template = "sap.fe.templates.AnalyticalListPage"
-    elif fiori_app_type == FioriAppType.WORKLIST.value:
-        template = "sap.fe.templates.ListReport"
-    else:
-        template = "sap.fe.templates.ListReport"
     
     manifest = {
         "_version": "1.59.0",
@@ -57,129 +165,57 @@ def generate_manifest_json(state: BuilderState) -> str:
             "id": app_id,
             "type": "application",
             "i18n": "i18n/i18n.properties",
-            "applicationVersion": {
-                "version": "1.0.0"
-            },
-            "title": f"{{{{appTitle}}}}",
-            "description": f"{{{{appDescription}}}}",
+            "applicationVersion": {"version": "1.0.0"},
+            "title": "{{appTitle}}",
+            "description": "{{appDescription}}",
             "resources": "resources.json",
-            "sourceTemplate": {
-                "id": "@sap/generator-fiori:lrop",
-                "version": "1.0.0"
-            },
+            "sourceTemplate": {"id": "@sap/generator-fiori:lrop", "version": "1.0.0"},
             "dataSources": {
                 "mainService": {
                     "uri": f"/{service_path}/",
                     "type": "OData",
-                    "settings": {
-                        "localUri": "localService/metadata.xml",
-                        "odataVersion": "4.0"
-                    }
+                    "settings": {"localUri": "localService/metadata.xml", "odataVersion": "4.0"}
                 }
             }
         },
         "sap.ui": {
             "technology": "UI5",
-            "icons": {
-                "icon": "",
-                "favIcon": "",
-                "phone": "",
-                "phone@2": "",
-                "tablet": "",
-                "tablet@2": ""
-            },
-            "deviceTypes": {
-                "desktop": True,
-                "tablet": True,
-                "phone": True
-            }
+            "icons": {"icon": "", "favIcon": "", "phone": "", "phone@2": "", "tablet": "", "tablet@2": ""},
+            "deviceTypes": {"desktop": True, "tablet": True, "phone": True}
         },
         "sap.ui5": {
             "flexEnabled": True,
             "dependencies": {
                 "minUI5Version": "1.120.0",
-                "libs": {
-                    "sap.m": {},
-                    "sap.ui.core": {},
-                    "sap.ushell": {},
-                    "sap.fe.templates": {}
-                }
+                "libs": {"sap.m": {}, "sap.ui.core": {}, "sap.ushell": {}, "sap.fe.templates": {}}
             },
-            "contentDensities": {
-                "compact": True,
-                "cozy": True
-            },
+            "contentDensities": {"compact": True, "cozy": True},
             "models": {
-                "i18n": {
-                    "type": "sap.ui.model.resource.ResourceModel",
-                    "settings": {
-                        "bundleName": f"{app_id}.i18n.i18n"
-                    }
-                },
-                "": {
-                    "dataSource": "mainService",
-                    "preload": True,
-                    "settings": {
-                        "operationMode": "Server",
-                        "autoExpandSelect": True,
-                        "earlyRequests": True
-                    }
-                }
+                "i18n": {"type": "sap.ui.model.resource.ResourceModel", "settings": {"bundleName": f"{app_id}.i18n.i18n"}},
+                "": {"dataSource": "mainService", "preload": True, "settings": {"operationMode": "Server", "autoExpandSelect": True, "earlyRequests": True}}
             },
             "routing": {
                 "config": {},
                 "routes": [
-                    {
-                        "name": f"{fiori_main_entity}List",
-                        "pattern": f":?query:",
-                        "target": f"{fiori_main_entity}List"
-                    },
-                    {
-                        "name": f"{fiori_main_entity}ObjectPage",
-                        "pattern": f"{fiori_main_entity}({{key}}):?query:",
-                        "target": f"{fiori_main_entity}ObjectPage"
-                    }
+                    {"name": f"{fiori_main_entity}List", "pattern": ":?query:", "target": f"{fiori_main_entity}List"},
+                    {"name": f"{fiori_main_entity}ObjectPage", "pattern": f"{fiori_main_entity}({{key}}):?query:", "target": f"{fiori_main_entity}ObjectPage"}
                 ],
                 "targets": {
                     f"{fiori_main_entity}List": {
-                        "type": "Component",
-                        "id": f"{fiori_main_entity}List",
-                        "name": "sap.fe.templates.ListReport",
-                        "options": {
-                            "settings": {
-                                "contextPath": f"/{fiori_main_entity}",
-                                "variantManagement": "Page",
-                                "navigation": {
-                                    fiori_main_entity: {
-                                        "detail": {
-                                            "route": f"{fiori_main_entity}ObjectPage"
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        "type": "Component", "id": f"{fiori_main_entity}List", "name": "sap.fe.templates.ListReport",
+                        "options": {"settings": {"contextPath": f"/{fiori_main_entity}", "variantManagement": "Page",
+                            "navigation": {fiori_main_entity: {"detail": {"route": f"{fiori_main_entity}ObjectPage"}}}}}
                     },
                     f"{fiori_main_entity}ObjectPage": {
-                        "type": "Component",
-                        "id": f"{fiori_main_entity}ObjectPage",
-                        "name": "sap.fe.templates.ObjectPage",
-                        "options": {
-                            "settings": {
-                                "contextPath": f"/{fiori_main_entity}",
-                                "editableHeaderContent": False
-                            }
-                        }
+                        "type": "Component", "id": f"{fiori_main_entity}ObjectPage", "name": "sap.fe.templates.ObjectPage",
+                        "options": {"settings": {"contextPath": f"/{fiori_main_entity}", "editableHeaderContent": False}}
                     }
                 }
             }
         },
-        "sap.fiori": {
-            "registrationIds": [],
-            "archeType": "transactional"
-        }
+        "sap.fiori": {"registrationIds": [], "archeType": "transactional"}
     }
     
-    # Add flexible column layout if enabled
     if layout_mode == LayoutMode.FLEXIBLE_COLUMN.value:
         manifest["sap.ui5"]["routing"]["config"]["flexibleColumnLayout"] = {
             "defaultTwoColumnLayoutType": "TwoColumnsBeginExpanded",
@@ -190,11 +226,9 @@ def generate_manifest_json(state: BuilderState) -> str:
 
 
 def generate_component_js(state: BuilderState) -> str:
-    """Generate Component.js for Fiori app."""
     namespace = state.get("project_namespace", "com.company.app")
     project_name = state.get("project_name", "App")
     app_id = f"{namespace}.{project_name.lower().replace('-', '').replace(' ', '')}"
-    
     return f'''sap.ui.define([
     "sap/fe/core/AppComponent"
 ], function (AppComponent) {{
@@ -210,49 +244,32 @@ def generate_component_js(state: BuilderState) -> str:
 
 
 def generate_i18n_properties(state: BuilderState) -> str:
-    """Generate i18n.properties file."""
     project_name = state.get("project_name", "App")
     project_description = state.get("project_description", "")
-    fiori_main_entity = state.get("fiori_main_entity", "Entity")
     entities = state.get("entities", [])
-    
-    lines = []
-    lines.append("# App Descriptor")
-    lines.append(f"appTitle={project_name}")
-    lines.append(f"appDescription={project_description or project_name + ' Application'}")
-    lines.append("")
-    lines.append("# Entity Labels")
-    
+    lines = [
+        "# App Descriptor",
+        f"appTitle={project_name}",
+        f"appDescription={project_description or project_name + ' Application'}",
+        "", "# Entity Labels",
+    ]
     for entity in entities:
         entity_name = entity.get("name", "Entity")
         lines.append(f"{entity_name}={entity_name}")
         lines.append(f"{entity_name}s={entity_name}s")
-        
-        # Field labels
         for field in entity.get("fields", []):
             field_name = field.get("name", "")
-            # Convert camelCase to Title Case
             label = "".join(" " + c if c.isupper() else c for c in field_name).strip().title()
             lines.append(f"{field_name}={label}")
-    
-    lines.append("")
-    lines.append("# Common Labels")
-    lines.append("Create=Create")
-    lines.append("Edit=Edit")
-    lines.append("Delete=Delete")
-    lines.append("Save=Save")
-    lines.append("Cancel=Cancel")
-    
+    lines += ["", "# Common Labels", "Create=Create", "Edit=Edit", "Delete=Delete", "Save=Save", "Cancel=Cancel"]
     return "\n".join(lines)
 
 
 def generate_index_html(state: BuilderState) -> str:
-    """Generate index.html for standalone testing."""
     namespace = state.get("project_namespace", "com.company.app")
     project_name = state.get("project_name", "App")
     fiori_theme = state.get("fiori_theme", FioriTheme.SAP_HORIZON.value)
     app_id = f"{namespace}.{project_name.lower().replace('-', '').replace(' ', '')}"
-    
     return f'''<!DOCTYPE html>
 <html>
 <head>
@@ -281,18 +298,11 @@ def generate_index_html(state: BuilderState) -> str:
 '''
 
 
-def generate_xs_app_json(state: BuilderState) -> str:
-    """Generate xs-app.json for app router."""
+def generate_xs_app_json() -> str:
     return json.dumps({
         "welcomeFile": "/index.html",
         "authenticationMethod": "route",
-        "routes": [
-            {
-                "source": "^/(.*)$",
-                "target": "$1",
-                "service": "html5-apps-repo-rt"
-            }
-        ]
+        "routes": [{"source": "^/(.*)$", "target": "$1", "service": "html5-apps-repo-rt"}]
     }, indent=4)
 
 
@@ -302,28 +312,24 @@ def generate_xs_app_json(state: BuilderState) -> str:
 
 async def fiori_ui_agent(state: BuilderState) -> BuilderState:
     """
-    SAP Fiori UI Agent
+    SAP Fiori UI Agent (LLM-Driven)
     
-    Generates:
-    1. app/{appname}/webapp/manifest.json - App descriptor
-    2. app/{appname}/webapp/Component.js - UI5 component
-    3. app/{appname}/webapp/i18n/i18n.properties - Translations
-    4. app/{appname}/webapp/index.html - Standalone HTML
-    5. app/{appname}/xs-app.json - App router config
-    
-    Returns updated state with generated Fiori files.
+    Uses LLM to generate production-quality Fiori Elements configurations.
+    Falls back to template-based generation if LLM fails.
     """
-    logger.info("Starting Fiori UI Agent")
+    logger.info("Starting Fiori UI Agent (LLM-Driven)")
     
     now = datetime.utcnow().isoformat()
     errors: list[ValidationError] = []
     generated_files: list[GeneratedFile] = []
     
-    # Update state
     state["current_agent"] = "fiori_ui"
     state["updated_at"] = now
+    state["current_logs"] = []
     
-    # Check prerequisites
+    log_progress(state, "Starting Fiori UI generation...")
+    
+    # Determine main entity
     fiori_main_entity = state.get("fiori_main_entity", "")
     if not fiori_main_entity:
         entities = state.get("entities", [])
@@ -331,96 +337,114 @@ async def fiori_ui_agent(state: BuilderState) -> BuilderState:
             fiori_main_entity = entities[0].get("name", "Entity")
             state["fiori_main_entity"] = fiori_main_entity
         else:
-            errors.append({
-                "agent": "fiori_ui",
-                "code": "NO_MAIN_ENTITY",
-                "message": "No main entity specified for Fiori app",
-                "field": "fiori_main_entity",
-                "severity": "error",
-            })
+            log_progress(state, "Error: No entities found for Fiori UI generation.")
+            errors.append({"agent": "fiori_ui", "code": "NO_MAIN_ENTITY", "message": "No main entity specified", "field": "fiori_main_entity", "severity": "error"})
             state["validation_errors"] = state.get("validation_errors", []) + errors
             return state
     
-    # App name (lowercased entity)
+    namespace = state.get("project_namespace", "com.company.app")
+    project_name = state.get("project_name", "App")
+    description = state.get("project_description", "")
+    app_type = state.get("fiori_app_type", FioriAppType.LIST_REPORT.value)
+    theme = state.get("fiori_theme", FioriTheme.SAP_HORIZON.value)
+    layout_mode = state.get("fiori_layout_mode", LayoutMode.FLEXIBLE_COLUMN.value)
+    entities = state.get("entities", [])
+    relationships = state.get("relationships", [])
+    provider = state.get("llm_provider")
+    
+    app_id = f"{namespace}.{project_name.lower().replace('-', '').replace(' ', '')}"
+    service_path = project_name.lower().replace(' ', '-')
     app_name = fiori_main_entity.lower()
     base_path = f"app/{app_name}/webapp"
     
-    # ==========================================================================
-    # Generate manifest.json
-    # ==========================================================================
-    try:
-        manifest = generate_manifest_json(state)
-        generated_files.append({
-            "path": f"{base_path}/manifest.json",
-            "content": manifest,
-            "file_type": "json",
-        })
-        logger.info(f"Generated {base_path}/manifest.json")
-    except Exception as e:
-        logger.error(f"Failed to generate manifest.json: {e}")
-        errors.append({
-            "agent": "fiori_ui",
-            "code": "MANIFEST_GENERATION_ERROR",
-            "message": f"Failed to generate manifest: {str(e)}",
-            "field": None,
-            "severity": "error",
-        })
+    # Get previously generated artifacts
+    schema_content = ""
+    service_content = ""
+    for artifact in state.get("artifacts_db", []):
+        if artifact.get("path") == "db/schema.cds":
+            schema_content = artifact.get("content", "")
+    for artifact in state.get("artifacts_srv", []):
+        if artifact.get("path") == "srv/service.cds":
+            service_content = artifact.get("content", "")
+    
+    llm_success = False
     
     # ==========================================================================
-    # Generate Component.js
+    # Attempt LLM-driven generation
     # ==========================================================================
     try:
-        component = generate_component_js(state)
-        generated_files.append({
-            "path": f"{base_path}/Component.js",
-            "content": component,
-            "file_type": "js",
-        })
-        logger.info(f"Generated {base_path}/Component.js")
+        llm_manager = get_llm_manager()
+        
+        prompt = FIORI_GENERATION_PROMPT.format(
+            project_name=project_name,
+            namespace=namespace,
+            description=description or "No description",
+            main_entity=fiori_main_entity,
+            app_type=app_type,
+            theme=theme,
+            layout_mode=layout_mode,
+            service_content=service_content or "(not available)",
+            schema_content=schema_content or "(not available)",
+            entities_json=json.dumps(entities, indent=2),
+            relationships_json=json.dumps(relationships, indent=2),
+            app_id=app_id,
+            service_path=service_path,
+        )
+        
+        log_progress(state, "Calling LLM for Fiori Elements generation...")
+        
+        response = await llm_manager.generate(
+            prompt=prompt,
+            system_prompt=FIORI_SYSTEM_PROMPT,
+            provider=provider,
+            temperature=0.1,
+        )
+        
+        parsed = _parse_llm_response(response)
+        
+        if parsed and parsed.get("manifest_json"):
+            manifest_data = parsed["manifest_json"]
+            if isinstance(manifest_data, dict):
+                manifest_str = json.dumps(manifest_data, indent=4)
+            else:
+                manifest_str = str(manifest_data)
+            
+            generated_files.append({"path": f"{base_path}/manifest.json", "content": manifest_str, "file_type": "json"})
+            log_progress(state, "LLM-generated manifest.json accepted.")
+            
+            if parsed.get("component_js"):
+                generated_files.append({"path": f"{base_path}/Component.js", "content": parsed["component_js"], "file_type": "js"})
+            
+            if parsed.get("i18n_properties"):
+                generated_files.append({"path": f"{base_path}/i18n/i18n.properties", "content": parsed["i18n_properties"], "file_type": "properties"})
+            
+            if parsed.get("index_html"):
+                generated_files.append({"path": f"{base_path}/index.html", "content": parsed["index_html"], "file_type": "html"})
+            
+            llm_success = True
+        else:
+            log_progress(state, "Could not parse LLM response. Falling back to template.")
+    
     except Exception as e:
-        logger.error(f"Failed to generate Component.js: {e}")
+        logger.warning(f"LLM generation failed for Fiori UI: {e}")
+        log_progress(state, f"LLM call failed ({str(e)[:80]}). Falling back to template.")
     
     # ==========================================================================
-    # Generate i18n
+    # Fallback: Template-based generation
     # ==========================================================================
-    try:
-        i18n = generate_i18n_properties(state)
-        generated_files.append({
-            "path": f"{base_path}/i18n/i18n.properties",
-            "content": i18n,
-            "file_type": "properties",
-        })
-        logger.info(f"Generated {base_path}/i18n/i18n.properties")
-    except Exception as e:
-        logger.error(f"Failed to generate i18n: {e}")
+    if not llm_success:
+        try:
+            log_progress(state, "Generating Fiori files via template fallback...")
+            generated_files.append({"path": f"{base_path}/manifest.json", "content": generate_manifest_json(state), "file_type": "json"})
+            generated_files.append({"path": f"{base_path}/Component.js", "content": generate_component_js(state), "file_type": "js"})
+            generated_files.append({"path": f"{base_path}/i18n/i18n.properties", "content": generate_i18n_properties(state), "file_type": "properties"})
+            generated_files.append({"path": f"{base_path}/index.html", "content": generate_index_html(state), "file_type": "html"})
+        except Exception as e:
+            logger.error(f"Template fallback failed for Fiori UI: {e}")
+            errors.append({"agent": "fiori_ui", "code": "FIORI_GENERATION_ERROR", "message": f"Fiori generation failed: {str(e)}", "field": None, "severity": "error"})
     
-    # ==========================================================================
-    # Generate index.html
-    # ==========================================================================
-    try:
-        index = generate_index_html(state)
-        generated_files.append({
-            "path": f"{base_path}/index.html",
-            "content": index,
-            "file_type": "html",
-        })
-        logger.info(f"Generated {base_path}/index.html")
-    except Exception as e:
-        logger.error(f"Failed to generate index.html: {e}")
-    
-    # ==========================================================================
-    # Generate xs-app.json
-    # ==========================================================================
-    try:
-        xs_app = generate_xs_app_json(state)
-        generated_files.append({
-            "path": f"app/{app_name}/xs-app.json",
-            "content": xs_app,
-            "file_type": "json",
-        })
-        logger.info(f"Generated app/{app_name}/xs-app.json")
-    except Exception as e:
-        logger.error(f"Failed to generate xs-app.json: {e}")
+    # xs-app.json (always template - trivial)
+    generated_files.append({"path": f"app/{app_name}/xs-app.json", "content": generate_xs_app_json(), "file_type": "json"})
     
     # ==========================================================================
     # Update state
@@ -428,7 +452,6 @@ async def fiori_ui_agent(state: BuilderState) -> BuilderState:
     state["artifacts_app"] = state.get("artifacts_app", []) + generated_files
     state["validation_errors"] = state.get("validation_errors", []) + errors
     
-    # Record execution
     state["agent_history"] = state.get("agent_history", []) + [{
         "agent_name": "fiori_ui",
         "status": "completed" if not any(e["severity"] == "error" for e in errors) else "failed",
@@ -436,8 +459,11 @@ async def fiori_ui_agent(state: BuilderState) -> BuilderState:
         "completed_at": datetime.utcnow().isoformat(),
         "duration_ms": None,
         "error": None,
+        "logs": state.get("current_logs", []),
     }]
     
-    logger.info(f"Fiori UI Agent completed. Generated {len(generated_files)} files.")
+    generation_method = "LLM" if llm_success else "template fallback"
+    log_progress(state, f"Fiori UI generation complete ({generation_method}).")
+    logger.info(f"Fiori UI Agent completed via {generation_method}. Generated {len(generated_files)} files.")
     
     return state

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect, useCallback } from 'react';
 import { 
   Search, 
   Settings, 
@@ -18,7 +18,9 @@ import {
   MoreVertical,
   CheckCircle2,
   Table as TableIcon,
-  Layers
+  Layers,
+  Maximize2,
+  Minimize2
 } from 'lucide-react';
 import { EntityDefinition } from '@/lib/api';
 
@@ -35,10 +37,33 @@ export function FioriPreview({ entities, mainEntityName, projectName }: FioriPre
   const [activeEntityName, setActiveEntityName] = useState<string>(mainEntityName || (entities.length > 0 ? entities[0].name : ''));
   const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [selectedItem, setSelectedItem] = useState<any>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   
   // Data State
   const [entityDataMap, setEntityDataMap] = useState<Record<string, any[]>>({});
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Escape key listener for full-screen
+  const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    if (e.key === 'Escape' && isFullscreen) {
+      setIsFullscreen(false);
+    }
+  }, [isFullscreen]);
+
+  useEffect(() => {
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [handleKeyDown]);
+
+  // Prevent body scroll when full-screen
+  useEffect(() => {
+    if (isFullscreen) {
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = '';
+    }
+    return () => { document.body.style.overflow = ''; };
+  }, [isFullscreen]);
 
   // Get active entity object
   const activeEntity = useMemo(() => {
@@ -131,7 +156,11 @@ export function FioriPreview({ entities, mainEntityName, projectName }: FioriPre
   }
 
   return (
-    <div className="w-full h-[650px] overflow-hidden rounded-xl border border-slate-200 bg-white flex shadow-2xl">
+    <div className={`${
+      isFullscreen
+        ? 'fixed inset-0 z-[999] w-screen h-screen'
+        : 'w-full h-[650px] rounded-xl border border-slate-200 shadow-2xl'
+    } overflow-hidden bg-white flex transition-all duration-300`}>
       {/* Sidebar Navigation */}
       <div className="w-56 bg-[#354a5f] flex flex-col shrink-0 border-r border-slate-300 transition-all duration-300">
         <div className="p-4 flex items-center gap-3 text-white border-b border-white/10">
@@ -173,6 +202,17 @@ export function FioriPreview({ entities, mainEntityName, projectName }: FioriPre
             <span className="text-xs font-bold text-blue-300 underline underline-offset-4">{activeEntityName}</span>
           </div>
           <div className="flex items-center gap-3">
+             <button
+               onClick={() => setIsFullscreen(!isFullscreen)}
+               className="p-1.5 rounded hover:bg-white/10 transition-colors"
+               title={isFullscreen ? 'Exit Full Screen (Esc)' : 'Full Screen'}
+             >
+               {isFullscreen ? (
+                 <Minimize2 className="w-4 h-4 cursor-pointer opacity-70 hover:opacity-100" />
+               ) : (
+                 <Maximize2 className="w-4 h-4 cursor-pointer opacity-70 hover:opacity-100" />
+               )}
+             </button>
              <Settings className="w-4 h-4 cursor-pointer opacity-60 hover:opacity-100" />
           </div>
         </div>

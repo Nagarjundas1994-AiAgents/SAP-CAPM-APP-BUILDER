@@ -3,12 +3,17 @@ Agent 7: Customization & Extension Agent
 
 Generates Clean Core compliant extension points and hooks for SAP CAP applications.
 Follows SAP's extensibility best practices for S/4HANA and BTP.
+
+Uses LLM to generate production-quality extension configurations with fallback to templates.
 """
 
 import logging
+import json
+import re
 from datetime import datetime
 from typing import Any
 
+from backend.agents.llm_providers import get_llm_manager
 from backend.agents.state import (
     BuilderState,
     EntityDefinition,
@@ -20,180 +25,225 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Extension Point Generation
+# System Prompts for LLM
+# =============================================================================
+
+EXTENSION_SYSTEM_PROMPT = """You are an expert SAP CAP extensibility architect following Clean Core principles.
+Your task is to generate production-ready extension points, hooks, and developer documentation.
+
+STRICT RULES:
+1. Use CDS aspects for extending entities: "extend entity X with { ... }"
+2. Create a hook registry pattern using Node.js EventEmitter or simple callback registration
+3. Document extension points clearly with JSDoc
+4. Follow SAP Clean Core principles - no modification of core, only extensions
+5. Provide lifecycle hooks: beforeCreate, afterCreate, beforeUpdate, afterUpdate, beforeDelete, afterDelete
+6. Add custom event hooks for business-process-specific events
+7. Generate comprehensive developer guide in Markdown
+8. Use proper module exports pattern
+9. Include extension validation to prevent breaking changes
+10. Support both synchronous and asynchronous hooks
+
+OUTPUT FORMAT:
+Return your response as valid JSON:
+{
+  "extensions_cds": "... full content of db/extensions.cds ...",
+  "hooks_js": "... full content of srv/lib/hooks.js ...",
+  "extension_guide_md": "... full content of docs/EXTENSION_GUIDE.md ..."
+}
+
+Do NOT include markdown code fences in the JSON values. Return ONLY the JSON object."""
+
+
+EXTENSION_GENERATION_PROMPT = """Generate extension points and hooks for this SAP CAP project.
+
+Project Name: {project_name}
+Project Description: {description}
+
+Schema:
+```
+{schema_content}
+```
+
+Service:
+```
+{service_content}
+```
+
+Entities:
+{entities_json}
+
+Business Rules:
+{business_rules_json}
+
+Requirements:
+1. db/extensions.cds:
+   - Define CDS aspects to extend each entity (e.g., custom fields, computed fields)
+   - Use "extend" keyword properly
+   - Add documentation comments
+
+2. srv/lib/hooks.js:
+   - EventEmitter-based hook registry
+   - Register/unregister hook functions
+   - Lifecycle hooks per entity: before/after CRUD
+   - Business event hooks (e.g., onOrderConfirmed, onStatusChanged)
+   - Error handling in hook execution
+   - Async hook support
+
+3. docs/EXTENSION_GUIDE.md:
+   - Overview of extension architecture
+   - How to add custom fields via CDS aspects
+   - How to register hooks with code examples
+   - List of available hook points per entity
+   - Best practices for extensions
+   - Troubleshooting section
+
+Respond with ONLY valid JSON."""
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+from backend.agents.progress import log_progress
+
+
+def _parse_llm_response(response_text: str) -> dict | None:
+    try:
+        text = response_text.strip()
+        if text.startswith("```json"):
+            text = text[7:]
+        if text.startswith("```"):
+            text = text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        return json.loads(text.strip())
+    except json.JSONDecodeError:
+        match = re.search(r'\{[\s\S]*\}', text)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                return None
+        return None
+
+
+# =============================================================================
+# Template Fallback Functions
 # =============================================================================
 
 def generate_extension_cds(state: BuilderState) -> str:
-    """Generate extension points CDS file."""
-    namespace = state.get("project_namespace", "com.company.app")
     entities = state.get("entities", [])
-    
-    lines = []
-    lines.append("// Extension Points")
-    lines.append("// Clean Core compliant extension hooks")
-    lines.append("")
-    lines.append(f"namespace {namespace}.extensions;")
-    lines.append("")
-    lines.append("using from '../db/schema';")
-    lines.append("")
-    
-    # Generate extension aspect for each entity
+    namespace = state.get("project_namespace", "com.company.app")
+    lines = [
+        f"// Extension Aspects for {namespace}",
+        "// Add custom fields and computed properties via CDS aspects",
+        "",
+        f"using {{ {namespace} as db }} from './schema';",
+        "",
+    ]
     for entity in entities:
-        entity_name = entity.get("name", "Entity")
-        
-        lines.append(f"/**")
-        lines.append(f" * Extension aspect for {entity_name}")
-        lines.append(f" * Add custom fields by extending this aspect")
-        lines.append(f" */")
-        lines.append(f"aspect {entity_name}Extension {{")
-        lines.append(f"    // Custom fields go here")
-        lines.append(f"    // Example:")
+        name = entity.get("name", "Entity")
+        lines.append(f"// Extension aspect for {name}")
+        lines.append(f"extend entity db.{name} with {{")
+        lines.append(f"    // Add custom extension fields here")
         lines.append(f"    // customField : String(100);")
-        lines.append(f"}}")
+        lines.append(f"}};")
         lines.append("")
-    
-    # Generate extension service
-    lines.append("// Extension Service")
-    lines.append("// Expose extension-specific actions")
-    lines.append("service ExtensionService @(path: '/extensions') {")
-    lines.append("    // Custom actions for extensions")
-    lines.append("}")
-    
     return "\n".join(lines)
 
 
 def generate_hooks_js(state: BuilderState) -> str:
-    """Generate extensible hooks JavaScript module."""
     entities = state.get("entities", [])
+    entity_names = [e.get("name", "Entity") for e in entities]
     
-    lines = []
-    lines.append("/**")
-    lines.append(" * Extension Hooks Module")
-    lines.append(" * Provides Clean Core compliant extension points")
-    lines.append(" */")
-    lines.append("")
-    lines.append("const cds = require('@sap/cds');")
-    lines.append("")
-    lines.append("/**")
-    lines.append(" * Extension registry for custom handlers")
-    lines.append(" */")
-    lines.append("class ExtensionRegistry {")
-    lines.append("    constructor() {")
-    lines.append("        this.hooks = new Map();")
-    lines.append("    }")
-    lines.append("")
-    lines.append("    /**")
-    lines.append("     * Register an extension hook")
-    lines.append("     * @param {string} hookName - Name of the hook point")
-    lines.append("     * @param {Function} handler - Handler function")
-    lines.append("     */")
-    lines.append("    register(hookName, handler) {")
-    lines.append("        if (!this.hooks.has(hookName)) {")
-    lines.append("            this.hooks.set(hookName, []);")
-    lines.append("        }")
-    lines.append("        this.hooks.get(hookName).push(handler);")
-    lines.append("    }")
-    lines.append("")
-    lines.append("    /**")
-    lines.append("     * Execute all handlers for a hook")
-    lines.append("     * @param {string} hookName - Name of the hook point")
-    lines.append("     * @param {Object} context - Execution context")
-    lines.append("     */")
-    lines.append("    async execute(hookName, context) {")
-    lines.append("        const handlers = this.hooks.get(hookName) || [];")
-    lines.append("        for (const handler of handlers) {")
-    lines.append("            await handler(context);")
-    lines.append("        }")
-    lines.append("    }")
-    lines.append("}")
-    lines.append("")
-    lines.append("// Global extension registry")
-    lines.append("const extensionRegistry = new ExtensionRegistry();")
-    lines.append("")
-    
-    # Generate hook points for each entity
-    lines.append("// Available Hook Points:")
-    for entity in entities:
-        entity_name = entity.get("name", "Entity")
-        lines.append(f"// - before{entity_name}Create")
-        lines.append(f"// - after{entity_name}Create")
-        lines.append(f"// - before{entity_name}Update")
-        lines.append(f"// - after{entity_name}Update")
-        lines.append(f"// - before{entity_name}Delete")
-        lines.append(f"// - after{entity_name}Delete")
-        lines.append(f"// - validate{entity_name}")
-    
-    lines.append("")
-    lines.append("module.exports = {")
-    lines.append("    extensionRegistry,")
-    lines.append("    register: (hookName, handler) => extensionRegistry.register(hookName, handler),")
-    lines.append("    execute: (hookName, context) => extensionRegistry.execute(hookName, context)")
-    lines.append("};")
-    
-    return "\n".join(lines)
+    hooks_code = """'use strict';
+const EventEmitter = require('events');
+
+/**
+ * Hook Registry for Extension Points
+ * Allows registering custom handlers for entity lifecycle events.
+ */
+class HookRegistry extends EventEmitter {
+    constructor() {
+        super();
+        this.setMaxListeners(50);
+    }
+
+    /**
+     * Register a hook for an entity lifecycle event
+     * @param {string} entity - Entity name
+     * @param {string} event - Event name (beforeCreate, afterCreate, etc.)
+     * @param {Function} handler - Handler function
+     */
+    registerHook(entity, event, handler) {
+        const eventName = `${entity}.${event}`;
+        this.on(eventName, handler);
+        console.log(`[Hooks] Registered hook: ${eventName}`);
+    }
+
+    /**
+     * Execute all hooks for an event
+     * @param {string} entity - Entity name
+     * @param {string} event - Event type
+     * @param {object} context - Event context (req, data, etc.)
+     */
+    async executeHooks(entity, event, context) {
+        const eventName = `${entity}.${event}`;
+        const listeners = this.listeners(eventName);
+        for (const listener of listeners) {
+            try {
+                await listener(context);
+            } catch (err) {
+                console.error(`[Hooks] Error in hook ${eventName}:`, err.message);
+            }
+        }
+    }
+}
+
+const registry = new HookRegistry();
+module.exports = { registry, HookRegistry };
+"""
+    return hooks_code
 
 
 def generate_extension_guide_md(state: BuilderState) -> str:
-    """Generate extension developer guide."""
     project_name = state.get("project_name", "App")
     entities = state.get("entities", [])
     
-    lines = []
-    lines.append(f"# {project_name} Extension Guide")
-    lines.append("")
-    lines.append("This guide explains how to extend the application following SAP's Clean Core principles.")
-    lines.append("")
-    lines.append("## Clean Core Principles")
-    lines.append("")
-    lines.append("1. **No Modification of Core Code** - Use extension points only")
-    lines.append("2. **Stable Interfaces** - Extensions communicate through defined APIs")
-    lines.append("3. **Side-by-Side Extensions** - Extensions are deployed independently")
-    lines.append("4. **Upgrade Stability** - Extensions survive core upgrades")
-    lines.append("")
-    lines.append("## Adding Custom Fields")
-    lines.append("")
-    lines.append("Create a new file `db/extensions.cds`:")
-    lines.append("")
-    lines.append("```cds")
-    lines.append("using from './schema';")
-    lines.append("")
-    
-    if entities:
-        entity_name = entities[0].get("name", "Entity")
-        lines.append(f"extend {entity_name} with {{")
-        lines.append("    customField : String(100);")
-        lines.append("    customDate  : Date;")
-        lines.append("}")
-    
-    lines.append("```")
-    lines.append("")
-    lines.append("## Adding Custom Handlers")
-    lines.append("")
-    lines.append("Use the extension hooks in `srv/extensions/my-extension.js`:")
-    lines.append("")
-    lines.append("```javascript")
-    lines.append("const { register } = require('../lib/hooks');")
-    lines.append("")
-    
-    if entities:
-        entity_name = entities[0].get("name", "Entity")
-        lines.append(f"register('before{entity_name}Create', async (context) => {{")
-        lines.append("    console.log('Extension: Before create hook');")
-        lines.append("    // Add custom logic")
-        lines.append("});")
-    
-    lines.append("```")
-    lines.append("")
-    lines.append("## Available Hook Points")
-    lines.append("")
-    lines.append("| Entity | Hook |")
-    lines.append("|--------|------|")
-    
+    lines = [
+        f"# Extension Guide - {project_name}",
+        "",
+        "## Overview",
+        "This project follows SAP Clean Core principles for extensibility.",
+        "",
+        "## Adding Custom Fields",
+        "Edit `db/extensions.cds` to add custom fields via CDS aspects:",
+        "```cds",
+        "extend entity db.YourEntity with {",
+        "    customField : String(100);",
+        "};",
+        "```",
+        "",
+        "## Registering Hooks",
+        "```javascript",
+        "const { registry } = require('./srv/lib/hooks');",
+        "registry.registerHook('EntityName', 'beforeCreate', async (ctx) => {",
+        "    // Your custom logic",
+        "});",
+        "```",
+        "",
+        "## Available Hook Points",
+    ]
     for entity in entities:
-        entity_name = entity.get("name", "Entity")
-        lines.append(f"| {entity_name} | before{entity_name}Create, after{entity_name}Create |")
-        lines.append(f"| {entity_name} | before{entity_name}Update, after{entity_name}Update |")
-        lines.append(f"| {entity_name} | before{entity_name}Delete, validate{entity_name} |")
+        name = entity.get("name", "Entity")
+        lines.append(f"### {name}")
+        lines.append(f"- `{name}.beforeCreate`")
+        lines.append(f"- `{name}.afterCreate`")
+        lines.append(f"- `{name}.beforeUpdate`")
+        lines.append(f"- `{name}.afterUpdate`")
+        lines.append(f"- `{name}.beforeDelete`")
+        lines.append(f"- `{name}.afterDelete`")
+        lines.append("")
     
     return "\n".join(lines)
 
@@ -204,96 +254,114 @@ def generate_extension_guide_md(state: BuilderState) -> str:
 
 async def extension_agent(state: BuilderState) -> BuilderState:
     """
-    Customization & Extension Agent
+    Customization & Extension Agent (LLM-Driven)
     
-    Generates:
-    1. db/extensions.cds - Extension aspects
-    2. srv/lib/hooks.js - Extension registry
-    3. docs/EXTENSION_GUIDE.md - Developer guide
-    
-    Returns updated state with extension files.
+    Uses LLM to generate production-quality extension points and hooks.
+    Falls back to template-based generation if LLM fails.
     """
-    logger.info("Starting Extension Agent")
+    logger.info("Starting Extension Agent (LLM-Driven)")
     
     now = datetime.utcnow().isoformat()
     errors: list[ValidationError] = []
     generated_files: list[GeneratedFile] = []
     
-    # Update state
     state["current_agent"] = "extension"
     state["updated_at"] = now
+    state["current_logs"] = []
     
-    # Only generate if extensions are enabled
-    if not state.get("fiori_extensions_enabled", True):
-        logger.info("Extensions disabled, skipping agent")
-        state["agent_history"] = state.get("agent_history", []) + [{
-            "agent_name": "extension",
-            "status": "skipped",
-            "started_at": now,
-            "completed_at": now,
-            "duration_ms": 0,
-            "error": "Extensions disabled",
-        }]
-        return state
+    log_progress(state, "Starting extension point generation...")
+    
+    entities = state.get("entities", [])
+    project_name = state.get("project_name", "App")
+    description = state.get("project_description", "")
+    business_rules = state.get("business_rules", [])
+    provider = state.get("llm_provider")
+    
+    schema_content = ""
+    service_content = ""
+    for artifact in state.get("artifacts_db", []):
+        if artifact.get("path") == "db/schema.cds":
+            schema_content = artifact.get("content", "")
+    for artifact in state.get("artifacts_srv", []):
+        if artifact.get("path") == "srv/service.cds":
+            service_content = artifact.get("content", "")
+    
+    llm_success = False
     
     # ==========================================================================
-    # Generate extension CDS
+    # Attempt LLM-driven generation
     # ==========================================================================
     try:
-        extension_cds = generate_extension_cds(state)
-        generated_files.append({
-            "path": "db/extensions.cds",
-            "content": extension_cds,
-            "file_type": "cds",
-        })
-        logger.info("Generated db/extensions.cds")
+        llm_manager = get_llm_manager()
+        
+        prompt = EXTENSION_GENERATION_PROMPT.format(
+            project_name=project_name,
+            description=description or "No description",
+            schema_content=schema_content or "(not available)",
+            service_content=service_content or "(not available)",
+            entities_json=json.dumps(entities, indent=2),
+            business_rules_json=json.dumps(business_rules, indent=2),
+        )
+        
+        log_progress(state, "Calling LLM for extension point generation...")
+        
+        response = await llm_manager.generate(
+            prompt=prompt,
+            system_prompt=EXTENSION_SYSTEM_PROMPT,
+            provider=provider,
+            temperature=0.1,
+        )
+        
+        parsed = _parse_llm_response(response)
+        
+        if parsed and (parsed.get("extensions_cds") or parsed.get("hooks_js")):
+            if parsed.get("extensions_cds"):
+                generated_files.append({"path": "db/extensions.cds", "content": parsed["extensions_cds"], "file_type": "cds"})
+            if parsed.get("hooks_js"):
+                generated_files.append({"path": "srv/lib/hooks.js", "content": parsed["hooks_js"], "file_type": "js"})
+            if parsed.get("extension_guide_md"):
+                generated_files.append({"path": "docs/EXTENSION_GUIDE.md", "content": parsed["extension_guide_md"], "file_type": "md"})
+            
+            log_progress(state, "LLM-generated extension points accepted.")
+            llm_success = True
+        else:
+            log_progress(state, "Could not parse LLM response. Falling back to template.")
+    
     except Exception as e:
-        logger.error(f"Failed to generate extensions.cds: {e}")
+        logger.warning(f"LLM generation failed for extensions: {e}")
+        log_progress(state, f"LLM call failed ({str(e)[:80]}). Falling back to template.")
     
     # ==========================================================================
-    # Generate hooks module
+    # Fallback: Template-based generation
     # ==========================================================================
-    try:
-        hooks_js = generate_hooks_js(state)
-        generated_files.append({
-            "path": "srv/lib/hooks.js",
-            "content": hooks_js,
-            "file_type": "js",
-        })
-        logger.info("Generated srv/lib/hooks.js")
-    except Exception as e:
-        logger.error(f"Failed to generate hooks.js: {e}")
-    
-    # ==========================================================================
-    # Generate extension guide
-    # ==========================================================================
-    try:
-        guide = generate_extension_guide_md(state)
-        generated_files.append({
-            "path": "docs/EXTENSION_GUIDE.md",
-            "content": guide,
-            "file_type": "md",
-        })
-        logger.info("Generated docs/EXTENSION_GUIDE.md")
-    except Exception as e:
-        logger.error(f"Failed to generate extension guide: {e}")
+    if not llm_success:
+        log_progress(state, "Generating extension files via template fallback...")
+        try:
+            generated_files.append({"path": "db/extensions.cds", "content": generate_extension_cds(state), "file_type": "cds"})
+            generated_files.append({"path": "srv/lib/hooks.js", "content": generate_hooks_js(state), "file_type": "js"})
+            generated_files.append({"path": "docs/EXTENSION_GUIDE.md", "content": generate_extension_guide_md(state), "file_type": "md"})
+        except Exception as e:
+            logger.error(f"Template fallback failed for extensions: {e}")
+            errors.append({"agent": "extension", "code": "EXTENSION_ERROR", "message": f"Extension generation failed: {str(e)}", "field": None, "severity": "error"})
     
     # ==========================================================================
     # Update state
     # ==========================================================================
-    state["artifacts_docs"] = state.get("artifacts_docs", []) + generated_files
+    state["artifacts_ext"] = state.get("artifacts_ext", []) + generated_files
     state["validation_errors"] = state.get("validation_errors", []) + errors
     
-    # Record execution
     state["agent_history"] = state.get("agent_history", []) + [{
         "agent_name": "extension",
-        "status": "completed",
+        "status": "completed" if not any(e["severity"] == "error" for e in errors) else "failed",
         "started_at": now,
         "completed_at": datetime.utcnow().isoformat(),
         "duration_ms": None,
         "error": None,
+        "logs": state.get("current_logs", []),
     }]
     
-    logger.info(f"Extension Agent completed. Generated {len(generated_files)} files.")
+    generation_method = "LLM" if llm_success else "template fallback"
+    log_progress(state, f"Extension generation complete ({generation_method}).")
+    logger.info(f"Extension Agent completed via {generation_method}. Generated {len(generated_files)} files.")
     
     return state

@@ -26,6 +26,13 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# Helpers
+# =============================================================================
+
+from backend.agents.progress import log_progress
+
+
+# =============================================================================
 # System Prompts
 # =============================================================================
 
@@ -39,6 +46,8 @@ STRICT RULES:
 3. Follow SAP naming conventions: PascalCase for entities, camelCase for fields
 4. Ensure all entity names are valid CDS identifiers (no spaces, special characters)
 5. Always include key fields for entities (preferably UUID primary keys)
+6. For diverse applications, ensure you include domain-specific fields (e.g., Currency for Finance, Dimensions for Logistics, etc.)
+7. Use SAP CDS Types correctly: String, Integer, Decimal, Boolean, Date, DateTime, UUID, etc.
 
 When analyzing requirements:
 1. Identify all business entities and their attributes
@@ -50,7 +59,8 @@ When analyzing requirements:
 Respond ONLY with valid JSON matching the expected schema."""
 
 
-ENTITY_EXTRACTION_PROMPT = """Analyze the following project description and extract entity definitions.
+ENTITY_EXTRACTION_PROMPT = """Analyze the following project description and extract detailed entity definitions. 
+Go beyond generic entities; identify specific business objects relevant to the domain.
 
 Project Name: {project_name}
 Description: {description}
@@ -58,13 +68,14 @@ Domain Type: {domain_type}
 
 Extract entities with their fields. For each entity, provide:
 - name: PascalCase entity name
-- description: Brief description
+- description: Detailed business description
 - fields: Array of field definitions with:
   - name: camelCase field name
-  - type: CDS type (String, Integer, Decimal, Date, DateTime, Boolean, UUID, LargeString, etc.)
+  - type: CDS type
   - length: For String types (optional)
   - key: true for primary key fields
   - nullable: true/false
+  - annotations: Object with optional SAP annotations like title, description, readonly, mandatory
 - aspects: Array of SAP aspects to apply (cuid, managed, temporal)
 
 Respond with JSON only:
@@ -185,6 +196,106 @@ DOMAIN_TEMPLATES: dict[str, dict[str, Any]] = {
             {"name": "lowStockAlert", "entity": "InventoryLevel", "rule_type": "validation", "description": "Alert when quantity below minimum"},
         ],
     },
+    DomainType.FINANCE.value: {
+        "entities": [
+            {
+                "name": "ExpenseReport",
+                "description": "Employee expense claim",
+                "fields": [
+                    {"name": "ID", "type": "UUID", "key": True, "nullable": False},
+                    {"name": "title", "type": "String", "length": 100, "nullable": False},
+                    {"name": "status", "type": "String", "length": 20, "nullable": False, "default": "'Draft'"},
+                    {"name": "totalAmount", "type": "Decimal", "precision": 15, "scale": 2, "nullable": False},
+                    {"name": "currency", "type": "String", "length": 3, "nullable": False, "default": "'EUR'"},
+                ],
+                "aspects": ["cuid", "managed"],
+            },
+            {
+                "name": "ExpenseItem",
+                "description": "Line item in an expense report",
+                "fields": [
+                    {"name": "ID", "type": "UUID", "key": True, "nullable": False},
+                    {"name": "category", "type": "String", "length": 50, "nullable": False},
+                    {"name": "description", "type": "String", "length": 255, "nullable": True},
+                    {"name": "amount", "type": "Decimal", "precision": 15, "scale": 2, "nullable": False},
+                    {"name": "date", "type": "Date", "nullable": False},
+                ],
+                "aspects": ["cuid"],
+            }
+        ],
+        "relationships": [
+            {"name": "items", "source_entity": "ExpenseReport", "target_entity": "ExpenseItem", "type": "composition", "cardinality": "1:n"}
+        ],
+        "business_rules": [
+            {"name": "autoApproval", "entity": "ExpenseReport", "rule_type": "workflow", "description": "Auto-approve reports under 500 EUR"}
+        ]
+    },
+    DomainType.HR.value: {
+        "entities": [
+            {
+                "name": "Employee",
+                "description": "Employee master data",
+                "fields": [
+                    {"name": "ID", "type": "UUID", "key": True, "nullable": False},
+                    {"name": "firstName", "type": "String", "length": 50, "nullable": False},
+                    {"name": "lastName", "type": "String", "length": 50, "nullable": False},
+                    {"name": "email", "type": "String", "length": 100, "nullable": False},
+                    {"name": "jobTitle", "type": "String", "length": 50, "nullable": True},
+                ],
+                "aspects": ["cuid", "managed"],
+            }
+        ],
+        "relationships": [],
+        "business_rules": []
+    },
+    DomainType.CRM.value: {
+        "entities": [
+            {
+                "name": "Account",
+                "description": "Customer account data",
+                "fields": [
+                    {"name": "ID", "type": "UUID", "key": True, "nullable": False},
+                    {"name": "name", "type": "String", "length": 100, "nullable": False},
+                    {"name": "industry", "type": "String", "length": 50, "nullable": True},
+                    {"name": "website", "type": "String", "length": 255, "nullable": True},
+                ],
+                "aspects": ["cuid", "managed"],
+            },
+            {
+                "name": "Contact",
+                "description": "Contact person for an account",
+                "fields": [
+                    {"name": "ID", "type": "UUID", "key": True, "nullable": False},
+                    {"name": "firstName", "type": "String", "length": 50, "nullable": False},
+                    {"name": "lastName", "type": "String", "length": 50, "nullable": False},
+                    {"name": "email", "type": "String", "length": 100, "nullable": False},
+                ],
+                "aspects": ["cuid", "managed"],
+            }
+        ],
+        "relationships": [
+            {"name": "account", "source_entity": "Contact", "target_entity": "Account", "type": "association", "cardinality": "n:1"}
+        ],
+        "business_rules": []
+    },
+    "logistics": {
+        "entities": [
+            {
+                "name": "Shipment",
+                "description": "Logistics shipment",
+                "fields": [
+                    {"name": "ID", "type": "UUID", "key": True, "nullable": False},
+                    {"name": "trackingNumber", "type": "String", "length": 50, "nullable": False},
+                    {"name": "origin", "type": "String", "length": 100, "nullable": False},
+                    {"name": "destination", "type": "String", "length": 100, "nullable": False},
+                    {"name": "status", "type": "String", "length": 20, "nullable": False, "default": "'Pending'"},
+                ],
+                "aspects": ["cuid", "managed"],
+            }
+        ],
+        "relationships": [],
+        "business_rules": []
+    }
 }
 
 
@@ -408,6 +519,9 @@ async def requirements_agent(state: BuilderState) -> BuilderState:
     # Update state
     state["current_agent"] = "requirements"
     state["updated_at"] = now
+    state["current_logs"] = [] # Reset logs for this agent
+    
+    log_progress(state, "Analyzing project configuration...")
     
     # ==========================================================================
     # Step 1: Validate project configuration
@@ -418,6 +532,7 @@ async def requirements_agent(state: BuilderState) -> BuilderState:
     if any(e["severity"] == "error" for e in errors):
         state["validation_errors"] = errors
         logger.error(f"Validation failed: {errors}")
+        log_progress(state, f"Validation failed: {errors[0]['message']}")
         return state
     
     # ==========================================================================
@@ -427,12 +542,13 @@ async def requirements_agent(state: BuilderState) -> BuilderState:
     
     if domain_type in DOMAIN_TEMPLATES and not state.get("entities"):
         # Use pre-defined template only if no entities already exist (e.g. from user approval)
-        logger.info(f"Using domain template: {domain_type}")
+        log_progress(state, f"Applying {domain_type} domain template...")
         template = DOMAIN_TEMPLATES[domain_type]
         
         state["entities"] = template.get("entities", [])
         state["relationships"] = template.get("relationships", [])
         state["business_rules"] = template.get("business_rules", [])
+        log_progress(state, f"Imported {len(state['entities'])} entities from template.")
     
     elif state.get("entities"):
         # User provided entities - check if they have fields defined
@@ -441,13 +557,12 @@ async def requirements_agent(state: BuilderState) -> BuilderState:
         
         if entities_need_fields:
             # Entities have no fields - use LLM to generate full entity definitions
-            logger.info("User provided entity names but no fields. Using LLM to generate complete entity definitions.")
+            entity_names = [e.get("name", "") for e in user_entities]
+            log_progress(state, f"Generating fields for entities: {', '.join(entity_names)}...")
             
             try:
                 llm_manager = get_llm_manager()
                 provider = state.get("llm_provider")
-                
-                entity_names = [e.get("name", "") for e in user_entities]
                 
                 prompt = f"""Generate complete CDS entity definitions for the following entities in a {project_name} application.
 
@@ -496,25 +611,27 @@ Respond with ONLY valid JSON:
                     state["entities"] = extracted.get("entities", user_entities)
                     state["relationships"] = extracted.get("relationships", [])
                     state["business_rules"] = extracted.get("business_rules", [])
-                    logger.info(f"LLM generated {len(state['entities'])} entities with fields")
+                    log_progress(state, f"LLM generated {len(state['entities'])} entities with fields.")
                     
                 except json.JSONDecodeError as e:
                     logger.warning(f"Failed to parse LLM response: {e}. Using fallback entity generation.")
+                    log_progress(state, "LLM parsing failed. Using fallback field generation.")
                     # Fallback: generate basic fields for each entity
                     state["entities"] = generate_fallback_entities(user_entities)
                     
             except Exception as e:
                 logger.error(f"LLM entity generation failed: {e}. Using fallback.")
+                log_progress(state, f"LLM generation failed: {str(e)}. Using fallback.")
                 # Fallback: generate basic fields
                 state["entities"] = generate_fallback_entities(user_entities)
         else:
             # Entities have fields - just validate
-            logger.info("Validating user-provided entities with fields")
+            log_progress(state, "Validating user-defined entities...")
             errors.extend(validate_entities(user_entities))
     
     else:
         # Custom domain without entities - use LLM to extract from description
-        logger.info("Extracting entities from description using LLM")
+        log_progress(state, "Extracting entities from project description...")
         
         description = state.get("project_description", "")
         if description:
@@ -551,9 +668,11 @@ Respond with ONLY valid JSON:
                     state["entities"] = extracted.get("entities", [])
                     state["relationships"] = extracted.get("relationships", [])
                     state["business_rules"] = extracted.get("business_rules", [])
+                    log_progress(state, f"Extracted {len(state['entities'])} entities from description.")
                     
                 except json.JSONDecodeError as e:
                     logger.warning(f"Failed to parse LLM response as JSON: {e}")
+                    log_progress(state, "Failed to parse entity extraction result.")
                     errors.append({
                         "agent": "requirements",
                         "code": "LLM_PARSE_ERROR",
@@ -564,6 +683,7 @@ Respond with ONLY valid JSON:
             
             except Exception as e:
                 logger.error(f"LLM extraction failed: {e}")
+                log_progress(state, f"Entity extraction failed: {str(e)}")
                 errors.append({
                     "agent": "requirements",
                     "code": "LLM_ERROR",
@@ -575,6 +695,7 @@ Respond with ONLY valid JSON:
     # ==========================================================================
     # Step 3: Final validation
     # ==========================================================================
+    log_progress(state, "Performing final validation...")
     errors.extend(validate_entities(state.get("entities", [])))
     
     # ==========================================================================
@@ -596,8 +717,10 @@ Respond with ONLY valid JSON:
         "completed_at": datetime.utcnow().isoformat(),
         "duration_ms": None,
         "error": None if not errors else str(errors[0]["message"]) if errors else None,
+        "logs": state.get("current_logs", []),
     }]
     
+    log_progress(state, "Requirements analysis complete.")
     logger.info(f"Requirements Agent completed. Entities: {len(state.get('entities', []))}, Errors: {len(errors)}")
     
     return state

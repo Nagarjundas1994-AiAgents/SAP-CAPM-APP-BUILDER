@@ -179,6 +179,7 @@ class AgentExecution(TypedDict):
     completed_at: str | None
     duration_ms: int | None
     error: str | None
+    logs: list[str] | None
 
 
 # =============================================================================
@@ -252,6 +253,7 @@ class BuilderState(TypedDict, total=False):
     # -------------------------------------------------------------------------
     current_agent: str
     agent_history: list[AgentExecution]
+    current_logs: list[str]
     
     # -------------------------------------------------------------------------
     # Validation Results
@@ -336,6 +338,7 @@ def create_initial_state(
         # Execution
         current_agent="",
         agent_history=[],
+        current_logs=[],
         
         # Validation
         validation_errors=[],
