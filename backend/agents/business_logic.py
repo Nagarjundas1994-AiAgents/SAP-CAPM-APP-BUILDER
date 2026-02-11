@@ -30,76 +30,57 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 BUSINESS_LOGIC_SYSTEM_PROMPT = """You are an expert SAP CAP (Cloud Application Programming Model) backend developer.
-Your task is to generate production-ready JavaScript service handlers for SAP CAP services.
+Your task is to generate production-ready, enterprise-grade JavaScript service handlers for SAP CAP services.
 
 STRICT RULES:
-1. Use `const cds = require('@sap/cds');` for imports in Node.js runtime
-2. Use `module.exports = cds.service.impl(async function() { ... });` pattern
-3. Register event handlers with this.before(), this.after(), this.on()
-4. Destructure entities from this.entities
-5. Use req.error(statusCode, message) for validation errors (NOT throw)
-6. Use cds.ql (SELECT, INSERT, UPDATE, DELETE) for database operations
-7. Use req.user for authentication checks
-8. Use req.data for request payload
-9. Handle both single and array results in after-READ handlers
-10. Add proper JSDoc comments for all handlers
-11. Implement REAL business logic, not just placeholder comments
-12. For validations: check data integrity, format, and business constraints
-13. For calculations: compute derived fields (totals, taxes, discounts)
-14. For side effects: update related entities, send notifications
-15. Use proper error codes: 400 for validation, 403 for authorization, 409 for conflicts
+1. Architecture: Use `const cds = require('@sap/cds');` and `module.exports = cds.service.impl(async function() { ... });`.
+2. Handlers: Use this.before(), this.after(), this.on(). Destructure entities from 'this.entities'.
+3. Database: Use 'cds.ql' (SELECT, INSERT, UPDATE, DELETE) or 'cds.tx(req).run(...)'.
+4. Validations:
+   - Perform deep data checks (length, format, business constraints).
+   - Use `req.error(400, 'Message', 'targetField')` for errors.
+5. Calculations:
+   - Compute totals, taxes, and status-dependent values in 'after' or 'before' handlers.
+   - For calculated fields in schema, ensure values are populated during CREATE/UPDATE.
+6. Actions:
+   - Implement custom action/function logic in '.on' handlers.
+   - Return proper types as defined in CDS.
+7. Side Effects: Update related entities where appropriate (e.g. updating stock when order item is created).
+8. Best Practices: Use 'srv/lib/utils.js' for common helper functions to keep the main handler clean.
 
 OUTPUT FORMAT:
-Return your response as valid JSON:
+Return a JSON object:
 {
-  "service_js": "... full content of srv/service.js ...",
-  "utils_js": "... full content of srv/lib/utils.js ..."
+  "service_js": "... srv/service.js content ...",
+  "utils_js": "... srv/lib/utils.js content ..."
 }
+Return ONLY the JSON."""
 
-Do NOT include markdown code fences in the JSON values. Return ONLY the JSON object."""
 
+BUSINESS_LOGIC_PROMPT = """Generate an enterprise-grade srv/service.js and srv/lib/utils.js.
 
-BUSINESS_LOGIC_PROMPT = """Generate srv/service.js and srv/lib/utils.js for this SAP CAP project.
+Project: {project_name}
+Description: {description}
 
-Project Name: {project_name}
-Project Description: {description}
-
-Service Definition (srv/service.cds):
-```
+Service Definition:
 {service_content}
-```
 
-Schema (db/schema.cds):
-```
+Schema & Business Rules:
 {schema_content}
-```
-
-Entities:
-{entities_json}
-
-Relationships:
-{relationships_json}
-
-Business Rules to implement:
 {business_rules_json}
 
-Requirements for srv/service.js:
-1. Import cds and destructure all entity references
-2. For EACH entity, implement these handlers with REAL logic:
-   - this.before('CREATE', Entity, ...) - validate required fields, generate IDs, set defaults
-   - this.after('READ', Entity, ...) - compute virtual/calculated fields
-   - this.before('UPDATE', Entity, ...) - validate changes, check permissions
-   - this.before('DELETE', Entity, ...) - check for dependent records, prevent orphans
-3. Implement handlers for business rules (validations, calculations, custom actions)
-4. Add proper error handling with meaningful messages
-5. Use cds.ql for database queries where needed
-6. Add audit logging calls for important operations
-7. The handlers should contain REAL working JavaScript code, not stub comments
+Requirements for service.js:
+1. Implement REAL validation for every entity based on field names and business rules.
+2. For entities with a 'status' field: implement status transition logic (e.g. can't move from 'Closed' to 'New').
+3. For collections: compute totals (e.g. Order.totalAmount = sum of OrderItem.amount).
+4. For IDs: if not UUID, implement auto-numbering logic (SHP-001, INV-001).
+5. Implement all Actions defined in service.cds with functional logic.
+6. Use 'srv/lib/utils.js' for shared logic like currency conversion or ID formatting.
 
-Requirements for srv/lib/utils.js:
-1. Helper functions relevant to this domain (ID generators, formatters, validators)
-2. Export as a module with JSDoc documentation
-3. Include domain-specific validation functions
+Requirements for utils.js:
+1. Provide functions for generating human-readable IDs.
+2. Provide validation helpers (email format, date range).
+3. Export as a module using 'module.exports'.
 
 Respond with ONLY valid JSON."""
 
@@ -398,6 +379,74 @@ async def business_logic_agent(state: BuilderState) -> BuilderState:
         })
     
     # ==========================================================================
+    # Validation & Self-Healing
+    # ==========================================================================
+    from backend.agents.validator import validate_artifact
+    from backend.agents.correction import generate_correction_prompt, should_retry_agent, format_correction_summary
+    
+    # Get retry configuration
+    max_retries = 3
+    retry_count = state.get("retry_counts", {}).get("business_logic", 0)
+    
+    # Validate the generated service.js
+    logic_artifact = next((f for f in generated_files if f["path"] == "srv/service.js"), None)
+    if logic_artifact and llm_success:
+        validation_results = validate_artifact(logic_artifact["path"], logic_artifact["content"])
+        
+        if any(result.has_errors for result in validation_results):
+            if should_retry_agent(validation_results, retry_count, max_retries):
+                log_progress(state, f"Validation found errors. Attempting correction (retry {retry_count + 1}/{max_retries})...")
+                
+                if "retry_counts" not in state:
+                    state["retry_counts"] = {}
+                state["retry_counts"]["business_logic"] = retry_count + 1
+                state["needs_correction"] = True
+                
+                if "correction_history" not in state:
+                    state["correction_history"] = []
+                state["correction_history"].append({
+                    "agent": "business_logic",
+                    "retry": retry_count + 1,
+                    "errors_found": sum(r.error_count for r in validation_results),
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+                
+                for result in validation_results:
+                    for issue in result.issues:
+                        if issue.severity.value == "error":
+                            log_progress(state, f"  - {issue.message}")
+                
+                state["artifacts_srv"] = []
+                return state
+            else:
+                log_progress(state, "⚠️ Max retries reached. Some validation errors remain.")
+                for result in validation_results:
+                    for issue in result.issues:
+                        if issue.severity.value == "error":
+                            errors.append({
+                                "agent": "business_logic",
+                                "code": issue.code or "VALIDATION_ERROR",
+                                "message": issue.message,
+                                "field": None,
+                                "severity": "warning"
+                            })
+        else:
+            if retry_count > 0:
+                log_progress(state, f"✅ Validation passed after {retry_count} correction(s)")
+                summary = format_correction_summary("business_logic", retry_count, retry_count, retry_count)
+                if "auto_fixed_errors" not in state:
+                    state["auto_fixed_errors"] = []
+                state["auto_fixed_errors"].append({
+                    "agent": "business_logic",
+                    "summary": summary,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+            else:
+                log_progress(state, "✅ Validation passed on first attempt")
+
+    state["needs_correction"] = False
+    
+    # ==========================================================================
     # Update state
     # ==========================================================================
     state["artifacts_srv"] = state.get("artifacts_srv", []) + generated_files
@@ -410,6 +459,7 @@ async def business_logic_agent(state: BuilderState) -> BuilderState:
         "completed_at": datetime.utcnow().isoformat(),
         "duration_ms": None,
         "error": None,
+        "retry_count": retry_count,
         "logs": state.get("current_logs", []),
     }]
     

@@ -339,6 +339,74 @@ async def security_agent(state: BuilderState) -> BuilderState:
             errors.append({"agent": "security", "code": "SECURITY_ERROR", "message": f"Security generation failed: {str(e)}", "field": None, "severity": "error"})
     
     # ==========================================================================
+    # Validation & Self-Healing
+    # ==========================================================================
+    from backend.agents.validator import validate_artifact
+    from backend.agents.correction import generate_correction_prompt, should_retry_agent, format_correction_summary
+    
+    # Get retry configuration
+    max_retries = 3
+    retry_count = state.get("retry_counts", {}).get("security", 0)
+    
+    # Validate the generated xs-security.json
+    xs_artifact = next((f for f in generated_files if f["path"] == "xs-security.json"), None)
+    if xs_artifact and llm_success:
+        validation_results = validate_artifact(xs_artifact["path"], xs_artifact["content"])
+        
+        if any(result.has_errors for result in validation_results):
+            if should_retry_agent(validation_results, retry_count, max_retries):
+                log_progress(state, f"Validation found errors. Attempting correction (retry {retry_count + 1}/{max_retries})...")
+                
+                if "retry_counts" not in state:
+                    state["retry_counts"] = {}
+                state["retry_counts"]["security"] = retry_count + 1
+                state["needs_correction"] = True
+                
+                if "correction_history" not in state:
+                    state["correction_history"] = []
+                state["correction_history"].append({
+                    "agent": "security",
+                    "retry": retry_count + 1,
+                    "errors_found": sum(r.error_count for r in validation_results),
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+                
+                for result in validation_results:
+                    for issue in result.issues:
+                        if issue.severity.value == "error":
+                            log_progress(state, f"  - {issue.message}")
+                
+                state["artifacts_security"] = []
+                return state
+            else:
+                log_progress(state, "⚠️ Max retries reached. Some validation errors remain.")
+                for result in validation_results:
+                    for issue in result.issues:
+                        if issue.severity.value == "error":
+                            errors.append({
+                                "agent": "security",
+                                "code": issue.code or "VALIDATION_ERROR",
+                                "message": issue.message,
+                                "field": None,
+                                "severity": "warning"
+                            })
+        else:
+            if retry_count > 0:
+                log_progress(state, f"✅ Validation passed after {retry_count} correction(s)")
+                summary = format_correction_summary("security", retry_count, retry_count, retry_count)
+                if "auto_fixed_errors" not in state:
+                    state["auto_fixed_errors"] = []
+                state["auto_fixed_errors"].append({
+                    "agent": "security",
+                    "summary": summary,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+            else:
+                log_progress(state, "✅ Validation passed on first attempt")
+
+    state["needs_correction"] = False
+    
+    # ==========================================================================
     # Update state
     # ==========================================================================
     state["artifacts_security"] = state.get("artifacts_security", []) + generated_files
@@ -351,6 +419,7 @@ async def security_agent(state: BuilderState) -> BuilderState:
         "completed_at": datetime.utcnow().isoformat(),
         "duration_ms": None,
         "error": None,
+        "retry_count": retry_count,
         "logs": state.get("current_logs", []),
     }]
     

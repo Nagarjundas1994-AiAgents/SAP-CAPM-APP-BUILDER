@@ -31,88 +31,57 @@ logger = logging.getLogger(__name__)
 # System Prompts for LLM
 # =============================================================================
 
-FIORI_SYSTEM_PROMPT = """You are an expert SAP Fiori Elements developer specializing in SAPUI5 and SAP Fiori Launchpad applications.
-Your task is to generate production-ready Fiori Elements configuration files.
+FIORI_SYSTEM_PROMPT = """You are an expert SAP Fiori Elements developer specializing in modern SAPUI5 applications.
+Your task is to generate production-ready, enterprise-grade Fiori Elements configuration files.
 
 STRICT RULES:
-1. manifest.json must follow SAP UI5 manifest schema version 1.59.0+
-2. Use sap.fe.templates for Fiori Elements V4 templates
-3. Configure proper routing with ListReport and ObjectPage targets
-4. Use FlexibleColumnLayout where appropriate
-5. Set up proper data source configuration pointing to the OData service
-6. Component.js must extend sap.fe.core.AppComponent
-7. i18n.properties must include all entity and field labels with proper human-readable names
-8. Include proper device type support (desktop, tablet, phone)
-9. Set contentDensities for both compact and cozy modes
-10. Configure variant management at Page level
-11. For child entities, add sub-object page routes
-12. Use {i18n>key} syntax for translatable texts in manifest
+1. Manifest Version: Use manifest schema 1.59.0+. Use 'sap.fe.templates' for V4.
+2. Multi-Entity Routing:
+   - Always include a ListReport for the main entity.
+   - Include ObjectPages for ALL entities (root and child).
+   - Configure deep routing (e.g. RootEntity -> ChildEntity) so users can navigate down the composition tree.
+3. Layout: ALWAYS use FlexibleColumnLayout (FCL) for a premium master-detail-detail experience.
+4. Component: Component.js MUST extend 'sap.fe.core.AppComponent'.
+5. Internationalization: 
+   - Use 'i18n.properties' for all user-facing strings.
+   - i18n keys must be descriptive: EntityName_plural, FieldName_label, Section_Title.
+6. UI5 Version: Target 1.120.0 or higher.
+7. Content Density: Support both 'compact' and 'cozy'.
 
 OUTPUT FORMAT:
-Return your response as valid JSON:
+Return a JSON object:
 {
-  "manifest_json": { ... complete manifest.json object ... },
-  "component_js": "... full Component.js content ...",
-  "i18n_properties": "... full i18n.properties content ...",
-  "index_html": "... full index.html content ..."
+  "manifest_json": { ... complete object ... },
+  "component_js": "... Component.js content ...",
+  "i18n_properties": "... i18n.properties content ...",
+  "index_html": "... index.html content ..."
 }
+Return ONLY the JSON object."""
 
-Do NOT include markdown code fences in the JSON values. Return ONLY the JSON object."""
 
+FIORI_GENERATION_PROMPT = """Generate a multi-entity SAP Fiori Elements application.
 
-FIORI_GENERATION_PROMPT = """Generate a complete SAP Fiori Elements application configuration.
-
-Project Name: {project_name}
-Project Namespace: {namespace}
-Project Description: {description}
+Project: {project_name} ({app_id})
 Main Entity: {main_entity}
-App Type: {app_type}
-Theme: {theme}
-Layout Mode: {layout_mode}
+Layout: {layout_mode}
 
-Service Definition:
-```
+Metadata:
 {service_content}
-```
-
-Schema:
-```
-{schema_content}
-```
-
-Entities:
 {entities_json}
-
-Relationships:
-{relationships_json}
 
 Requirements:
 1. manifest.json:
-   - App ID: "{app_id}"
-   - Service URI: "/{service_path}/"
-   - OData V4 data source
-   - ListReport page for main entity "{main_entity}"
-   - ObjectPage for "{main_entity}" details
-   - Sub-ObjectPages for child entities (based on compositions/associations)
-   - FlexibleColumnLayout if layout_mode is "flexible_column"
-   - Proper navigation config between list and detail
-   
-2. Component.js:
-   - Extend sap.fe.core.AppComponent
-   - Use app ID "{app_id}"
-   
-3. i18n.properties:
-   - App title and description
-   - Labels for ALL entities and ALL fields (human-readable, Title Case)
-   - Common action labels (Create, Edit, Delete, Save, Cancel)
-   - Section labels for Object Page facets
-   
-4. index.html:
-   - Bootstrap with theme "{theme}"
-   - Resource roots pointing to app ID
-   - ComponentSupport for auto-instantiation
+   - Configure ListReport for "{main_entity}".
+   - Configure ObjectPage for "{main_entity}" and ALL associated/composited entities.
+   - Use 'FCL' (FlexibleColumnLayout) for routing.
+   - Set up navigation paths so child entities are reachable from parent Object Pages.
+2. i18n.properties:
+   - Generate at least 30+ labels covering all entities, fields, and UI sections.
+   - Use human-readable titles (e.g. 'Product Details' instead of 'ProductObjectPage').
+3. index.html:
+   - Use theme "{theme}" and bootstrap the component correctly.
 
-Respond with ONLY valid JSON."""
+Ensure the app is fully navigable across all entities defined in the service."""
 
 
 # =============================================================================
@@ -447,6 +416,74 @@ async def fiori_ui_agent(state: BuilderState) -> BuilderState:
     generated_files.append({"path": f"app/{app_name}/xs-app.json", "content": generate_xs_app_json(), "file_type": "json"})
     
     # ==========================================================================
+    # Validation & Self-Healing
+    # ==========================================================================
+    from backend.agents.validator import validate_artifact
+    from backend.agents.correction import generate_correction_prompt, should_retry_agent, format_correction_summary
+    
+    # Get retry configuration
+    max_retries = 3
+    retry_count = state.get("retry_counts", {}).get("fiori_ui", 0)
+    
+    # Validate the generated manifest.json
+    manifest_artifact = next((f for f in generated_files if f["path"].endswith("manifest.json")), None)
+    if manifest_artifact and llm_success:
+        validation_results = validate_artifact(manifest_artifact["path"], manifest_artifact["content"])
+        
+        if any(result.has_errors for result in validation_results):
+            if should_retry_agent(validation_results, retry_count, max_retries):
+                log_progress(state, f"Validation found errors. Attempting correction (retry {retry_count + 1}/{max_retries})...")
+                
+                if "retry_counts" not in state:
+                    state["retry_counts"] = {}
+                state["retry_counts"]["fiori_ui"] = retry_count + 1
+                state["needs_correction"] = True
+                
+                if "correction_history" not in state:
+                    state["correction_history"] = []
+                state["correction_history"].append({
+                    "agent": "fiori_ui",
+                    "retry": retry_count + 1,
+                    "errors_found": sum(r.error_count for r in validation_results),
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+                
+                for result in validation_results:
+                    for issue in result.issues:
+                        if issue.severity.value == "error":
+                            log_progress(state, f"  - {issue.message}")
+                
+                state["artifacts_app"] = []
+                return state
+            else:
+                log_progress(state, "⚠️ Max retries reached. Some validation errors remain.")
+                for result in validation_results:
+                    for issue in result.issues:
+                        if issue.severity.value == "error":
+                            errors.append({
+                                "agent": "fiori_ui",
+                                "code": issue.code or "VALIDATION_ERROR",
+                                "message": issue.message,
+                                "field": None,
+                                "severity": "warning"
+                            })
+        else:
+            if retry_count > 0:
+                log_progress(state, f"✅ Validation passed after {retry_count} correction(s)")
+                summary = format_correction_summary("fiori_ui", retry_count, retry_count, retry_count)
+                if "auto_fixed_errors" not in state:
+                    state["auto_fixed_errors"] = []
+                state["auto_fixed_errors"].append({
+                    "agent": "fiori_ui",
+                    "summary": summary,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+            else:
+                log_progress(state, "✅ Validation passed on first attempt")
+
+    state["needs_correction"] = False
+    
+    # ==========================================================================
     # Update state
     # ==========================================================================
     state["artifacts_app"] = state.get("artifacts_app", []) + generated_files
@@ -459,6 +496,7 @@ async def fiori_ui_agent(state: BuilderState) -> BuilderState:
         "completed_at": datetime.utcnow().isoformat(),
         "duration_ms": None,
         "error": None,
+        "retry_count": retry_count,
         "logs": state.get("current_logs", []),
     }]
     

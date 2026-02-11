@@ -61,6 +61,7 @@ class OpenAIProvider(LLMProvider):
     
     async def generate(self, messages: list[BaseMessage], **kwargs) -> str:
         model = self.get_chat_model(**kwargs)
+        logger.info(f"LLM Generation: provider={self.name}, model={self.model}")
         response = await model.ainvoke(messages)
         return str(response.content)
 
@@ -91,6 +92,7 @@ class GeminiProvider(LLMProvider):
     
     async def generate(self, messages: list[BaseMessage], **kwargs) -> str:
         model = self.get_chat_model(**kwargs)
+        logger.info(f"LLM Generation: provider={self.name}, model={self.model}")
         response = await model.ainvoke(messages)
         return str(response.content)
 
@@ -118,6 +120,7 @@ class DeepSeekProvider(LLMProvider):
     
     async def generate(self, messages: list[BaseMessage], **kwargs) -> str:
         model = self.get_chat_model(**kwargs)
+        logger.info(f"LLM Generation: provider={self.name}, model={self.model}")
         response = await model.ainvoke(messages)
         return str(response.content)
 

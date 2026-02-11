@@ -30,6 +30,17 @@ logger = logging.getLogger(__name__)
 # Route Functions
 # =============================================================================
 
+def should_retry_agent(state: BuilderState) -> str:
+    """
+    Generic routing function for self-healing agents.
+    If 'needs_correction' is True, loops back to the same agent.
+    Otherwise, continues to the next step.
+    """
+    if state.get("needs_correction"):
+        return "retry"
+    return "continue"
+
+
 def should_continue_after_requirements(state: BuilderState) -> Literal["data_modeling", "end"]:
     """Check if requirements agent succeeded and we should continue."""
     errors = state.get("validation_errors", [])
@@ -42,19 +53,6 @@ def should_continue_after_requirements(state: BuilderState) -> Literal["data_mod
     return "data_modeling"
 
 
-def should_continue_after_data_modeling(state: BuilderState) -> Literal["service_exposure", "end"]:
-    """Check if data modeling succeeded."""
-    errors = state.get("validation_errors", [])
-    recent_errors = [e for e in errors if e.get("agent") == "data_modeling"]
-    has_critical_error = any(e.get("severity") == "error" for e in recent_errors)
-    
-    if has_critical_error:
-        logger.warning("Data modeling failed, stopping workflow")
-        return "end"
-    
-    return "service_exposure"
-
-
 # =============================================================================
 # Graph Builder
 # =============================================================================
@@ -65,16 +63,14 @@ def create_builder_graph() -> StateGraph:
     
     Flow:
     1. Requirements → validation check
-    2. Data Modeling → validation check
-    3. Service Exposure
-    4. Business Logic
-    5. Fiori UI       } These can run in parallel conceptually
+    2. Data Modeling (Self-Healing)
+    3. Service Exposure (Self-Healing)
+    4. Business Logic (Self-Healing)
+    5. Fiori UI
     6. Security
     7. Extension
     8. Deployment
     9. Validation (final)
-    
-    Any failure halts the workflow and marks it as failed.
     """
     
     # Create the graph
@@ -95,6 +91,8 @@ def create_builder_graph() -> StateGraph:
     graph.set_entry_point("requirements")
     
     # Add conditional edges
+    
+    # 1. Requirements -> Data Modeling
     graph.add_conditional_edges(
         "requirements",
         should_continue_after_requirements,
@@ -104,22 +102,89 @@ def create_builder_graph() -> StateGraph:
         }
     )
     
+    # 2. Data Modeling (with retry loop)
     graph.add_conditional_edges(
         "data_modeling",
-        should_continue_after_data_modeling,
+        should_retry_agent,
         {
-            "service_exposure": "service_exposure",
-            "end": END,
+            "retry": "data_modeling",
+            "continue": "service_exposure",
+        }
+    )
+    
+    # 3. Service Exposure (with retry loop)
+    graph.add_conditional_edges(
+        "service_exposure",
+        should_retry_agent,
+        {
+            "retry": "service_exposure",
+            "continue": "business_logic",
+        }
+    )
+    
+    # 4. Business Logic (with retry loop)
+    graph.add_conditional_edges(
+        "business_logic",
+        should_retry_agent,
+        {
+            "retry": "business_logic",
+            "continue": "fiori_ui",
         }
     )
     
     # Linear flow for now (can be parallelized later)
     graph.add_edge("service_exposure", "business_logic")
-    graph.add_edge("business_logic", "fiori_ui")
-    graph.add_edge("fiori_ui", "security")
-    graph.add_edge("security", "extension")
-    graph.add_edge("extension", "deployment")
-    graph.add_edge("deployment", "validation")
+    # 4. Business Logic (with retry loop)
+    graph.add_conditional_edges(
+        "business_logic",
+        should_retry_agent,
+        {
+            "retry": "business_logic",
+            "continue": "fiori_ui",
+        }
+    )
+    
+    # 5. Fiori UI (with retry loop)
+    graph.add_conditional_edges(
+        "fiori_ui",
+        should_retry_agent,
+        {
+            "retry": "fiori_ui",
+            "continue": "security",
+        }
+    )
+    
+    # 6. Security (with retry loop)
+    graph.add_conditional_edges(
+        "security",
+        should_retry_agent,
+        {
+            "retry": "security",
+            "continue": "extension",
+        }
+    )
+    
+    # 7. Extension (with retry loop)
+    graph.add_conditional_edges(
+        "extension",
+        should_retry_agent,
+        {
+            "retry": "extension",
+            "continue": "deployment",
+        }
+    )
+    
+    # 8. Deployment (with retry loop)
+    graph.add_conditional_edges(
+        "deployment",
+        should_retry_agent,
+        {
+            "retry": "deployment",
+            "continue": "validation",
+        }
+    )
+    
+    # 9. Validation (final)
     graph.add_edge("validation", END)
     
     return graph

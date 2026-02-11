@@ -30,31 +30,33 @@ logger = logging.getLogger(__name__)
 # System Prompts for LLM
 # =============================================================================
 
-DEPLOYMENT_SYSTEM_PROMPT = """You are an expert SAP BTP deployment architect specializing in Cloud Foundry, MTA builds, and CI/CD pipelines.
-Your task is to generate production-ready deployment configurations for SAP CAP applications.
+DEPLOYMENT_SYSTEM_PROMPT = """You are an expert SAP BTP deployment architect.
+Your task is to generate production-ready deployment configurations and essential project scaffolding files.
 
 STRICT RULES:
-1. mta.yaml must follow MTA specification 3.3+ with proper schema version
-2. Include modules for: srv (Node.js), db-deployer (hdb), app (html5), destination-content
-3. Include resources for: xsuaa, hana, destination, html5-repo-host, html5-repo-runtime
-4. Use proper build-parameters with builder types (npm, custom, hdb)
-5. Set up service binding requires/provides correctly
-6. GitHub Actions CI/CD must use SAP MTA build tool (mbt)
-7. Dockerfile should be multi-stage with node:18-alpine
-8. docker-compose.yml should orchestrate db + app services for local dev
-9. Include proper health checks and resource limits
-10. Follow SAP BTP deployment best practices
+1. Deployment:
+   - mta.yaml (MTA 3.3+) with srv, db, and ui modules.
+   - GitHub Actions for build and deploy.
+   - Dockerfile (node:18-alpine) and docker-compose.yml.
+2. Scaffolding:
+   - package.json: Include '@sap/cds', 'express', 'passport', and SAP HANA dependencies. Add 'start' and 'watch' scripts.
+   - README.md: Professional overview, setup instructions, and entity documentation.
+   - .gitignore: Exclude node_modules, gen/, mta_archives/, and .env.
+   - .env.example: List required environment variables (PORT, DB configuration).
 
 OUTPUT FORMAT:
-Return your response as valid JSON:
+Return a JSON object:
 {
-  "mta_yaml": "... full content of mta.yaml ...",
-  "github_actions": "... full content of .github/workflows/deploy.yml ...",
-  "dockerfile": "... full content of Dockerfile ...",
-  "docker_compose": "... full content of docker-compose.yml ..."
+  "mta_yaml": "... mta.yaml content ...",
+  "github_actions": "... deploy.yml content ...",
+  "dockerfile": "... Dockerfile content ...",
+  "docker_compose": "... docker-compose.yml content ...",
+  "package_json": "... package.json content ...",
+  "readme_md": "... README.md content ...",
+  "gitignore": "... .gitignore content ...",
+  "env_example": "... .env.example content ..."
 }
-
-Do NOT include markdown code fences in the JSON values. Return ONLY the JSON object."""
+Return ONLY the JSON object."""
 
 
 DEPLOYMENT_GENERATION_PROMPT = """Generate deployment configuration for this SAP CAP project.
@@ -385,7 +387,17 @@ async def deployment_agent(state: BuilderState) -> BuilderState:
             if parsed.get("docker_compose"):
                 generated_files.append({"path": "docker-compose.yml", "content": parsed["docker_compose"], "file_type": "yaml"})
             
-            log_progress(state, "LLM-generated deployment config accepted.")
+            # Scaffolding
+            if parsed.get("package_json"):
+                generated_files.append({"path": "package.json", "content": parsed["package_json"], "file_type": "json"})
+            if parsed.get("readme_md"):
+                generated_files.append({"path": "README.md", "content": parsed["readme_md"], "file_type": "markdown"})
+            if parsed.get("gitignore"):
+                generated_files.append({"path": ".gitignore", "content": parsed["gitignore"], "file_type": "text"})
+            if parsed.get("env_example"):
+                generated_files.append({"path": ".env.example", "content": parsed["env_example"], "file_type": "text"})
+            
+            log_progress(state, "LLM-generated deployment and scaffolding files accepted.")
             llm_success = True
         else:
             log_progress(state, "Could not parse LLM response. Falling back to template.")
@@ -409,9 +421,70 @@ async def deployment_agent(state: BuilderState) -> BuilderState:
             errors.append({"agent": "deployment", "code": "DEPLOYMENT_ERROR", "message": f"Deployment config failed: {str(e)}", "field": None, "severity": "error"})
     
     # ==========================================================================
+    # Validation & Self-Healing
+    # ==========================================================================
+    from backend.agents.validator import validate_artifact
+    from backend.agents.correction import generate_correction_prompt, should_retry_agent, format_correction_summary
+    
+    # Get retry configuration
+    max_retries = 3
+    retry_count = state.get("retry_counts", {}).get("deployment", 0)
+    
+    # Validate critical deployment files (package.json and mta.yaml)
+    critical_files = ["package.json", "mta.yaml"]
+    validation_failed = False
+    
+    if llm_success:
+        for file_path in critical_files:
+            artifact = next((f for f in generated_files if f["path"] == file_path), None)
+            if artifact:
+                validation_results = validate_artifact(artifact["path"], artifact["content"])
+                if any(result.has_errors for result in validation_results):
+                    validation_failed = True
+                    log_progress(state, f"Validation failed for {file_path}")
+                    
+                    if should_retry_agent(validation_results, retry_count, max_retries):
+                        log_progress(state, f"Attempting correction (retry {retry_count + 1}/{max_retries})...")
+                        
+                        if "retry_counts" not in state:
+                            state["retry_counts"] = {}
+                        state["retry_counts"]["deployment"] = retry_count + 1
+                        state["needs_correction"] = True
+                        
+                        if "correction_history" not in state:
+                            state["correction_history"] = []
+                        state["correction_history"].append({
+                            "agent": "deployment",
+                            "retry": retry_count + 1,
+                            "errors_found": sum(r.error_count for r in validation_results),
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                        
+                        state["artifacts_deployment"] = []
+                        return state
+                    else:
+                        log_progress(state, f"⚠️ Max retries reached for {file_path}. Errors remain.")
+        
+        if not validation_failed:
+            if retry_count > 0:
+                log_progress(state, f"✅ Validation passed after {retry_count} correction(s)")
+                summary = format_correction_summary("deployment", retry_count, retry_count, retry_count)
+                if "auto_fixed_errors" not in state:
+                    state["auto_fixed_errors"] = []
+                state["auto_fixed_errors"].append({
+                    "agent": "deployment",
+                    "summary": summary,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+            else:
+                log_progress(state, "✅ Validation passed on first attempt")
+
+    state["needs_correction"] = False
+    
+    # ==========================================================================
     # Update state
     # ==========================================================================
-    state["artifacts_deploy"] = state.get("artifacts_deploy", []) + generated_files
+    state["artifacts_deployment"] = state.get("artifacts_deployment", []) + generated_files
     state["validation_errors"] = state.get("validation_errors", []) + errors
     
     state["agent_history"] = state.get("agent_history", []) + [{
@@ -421,6 +494,7 @@ async def deployment_agent(state: BuilderState) -> BuilderState:
         "completed_at": datetime.utcnow().isoformat(),
         "duration_ms": None,
         "error": None,
+        "retry_count": retry_count,
         "logs": state.get("current_logs", []),
     }]
     

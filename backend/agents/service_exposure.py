@@ -30,68 +30,50 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 SERVICE_SYSTEM_PROMPT = """You are an expert SAP CAP (Cloud Application Programming Model) service architect.
-Your task is to generate production-ready CDS service definitions and Fiori annotations.
+Your task is to generate production-ready, enterprise-grade OData service definitions and Fiori annotations.
 
 STRICT RULES:
-1. Use correct CDS service syntax: service <Name> @(path: '/endpoint') { ... }
-2. Use proper "using" statements to reference db schema entities
-3. Use projections: "entity X as projection on db.X"
-4. Add @odata.draft.enabled for draft-capable entities
-5. Define custom actions/functions bound to entities where business rules exist
-6. Generate complete Fiori annotations: UI.SelectionFields, UI.LineItem, UI.HeaderInfo, UI.Facets, UI.FieldGroup
-7. Use proper annotation syntax with @ prefixes
-8. Follow SAP Fiori Elements best practices for List Report and Object Page patterns
-9. Add @Capabilities annotations for restricting operations where appropriate
-10. Only project entity fields that exist in the schema
+1. Service Syntax: service <Name> @(path: '/endpoint') { ... }
+2. Use projections: "entity X as projection on db.X". Use 'db' as the alias for the database namespace.
+3. Draft Handling: MUST add @odata.draft.enabled for all root entities and composited children if editing is intended.
+4. Business Logic: Define actions and functions for every business rule (e.g. action approveInvoice(), function getDiscount() returns Decimal).
+5. Fiori Annotations (annotations.cds):
+   - You MUST generate annotations for EVERY entity projected.
+   - Include: UI.LineItem, UI.HeaderInfo, UI.Facets, UI.SelectionFields, UI.FieldGroup.
+   - For child entities in a composition, add UI.LineItem for display on the parent's Object Page.
+   - Add UI.DataFieldForAction for every defined custom action.
+6. Value Helps: Use @Common.ValueList where enums or CodeLists were defined in the schema.
+7. Internationalization: Use {{@i18n>...}} for labels if possible, otherwise use clear strings with @Common.Label.
 
 OUTPUT FORMAT:
-Return your response as valid JSON:
+Return a JSON object:
 {
-  "service_cds": "... full content of srv/service.cds ...",
-  "annotations_cds": "... full content of srv/annotations.cds ..."
+  "service_cds": "... srv/service.cds content ...",
+  "annotations_cds": "... srv/annotations.cds content ..."
 }
+Return ONLY the JSON."""
 
-Do NOT include markdown code fences in the JSON values. Return ONLY the JSON object."""
 
+SERVICE_GENERATION_PROMPT = """Generate an enterprise-grade srv/service.cds and srv/annotations.cds.
 
-SERVICE_GENERATION_PROMPT = """Generate srv/service.cds and srv/annotations.cds for this SAP CAP project.
+Project: {project_name} ({namespace})
+Draft: {draft_enabled}
 
-Project Name: {project_name}
-Project Namespace: {namespace}
-OData Version: {odata_version}
-Draft Enabled: {draft_enabled}
-
-Schema (db/schema.cds) that was already generated:
-```
+Schema Details:
 {schema_content}
-```
 
-Entities:
+Entities & Rules:
 {entities_json}
-
-Relationships:
-{relationships_json}
-
-Business Rules:
 {business_rules_json}
 
-Requirements for service.cds:
-1. Import from '../db/schema' using the namespace '{namespace}'
-2. Set OData protocol version annotation
-3. Create a service named "{service_name}" at path '/{service_path}'
-4. Create projections for ALL entities
-5. Add @odata.draft.enabled where appropriate
-6. Add custom actions/functions for business rules (e.g., "action confirmOrder() returns String;")
-
-Requirements for annotations.cds:
-1. Import from './service'
-2. For EACH entity, add comprehensive Fiori annotations:
-   - UI.SelectionFields: filterable String fields (max 4)
-   - UI.LineItem: visible columns in list (max 8), with @UI.Importance
-   - UI.HeaderInfo: TypeName, TypeNamePlural, Title, Description
-   - UI.Facets: at least GeneralInfo and any child-entity sections
-   - UI.FieldGroup#GeneralInfo: all non-key fields
-   - @Common.Label for each field with a human-readable label
+Requirements:
+1. Define a service '{service_name}' at '/{service_path}'.
+2. Projects ALL entities from the schema.
+3. Enable draft (@odata.draft.enabled) for all primary business objects.
+4. Add bound actions for rules like 'validation', 'workflow', or 'calculation'.
+5. Annotate ALL entities in annotations.cds with ListReport/ObjectPage patterns.
+6. Ensure Object Pages include sections (Facets) for all child entity compositions.
+7. Add @UI.LineItem items for 'DataFieldForAction' to trigger your custom actions.
 
 Respond with ONLY valid JSON."""
 
@@ -389,6 +371,74 @@ using from './annotations';
     })
     
     # ==========================================================================
+    # Validation & Self-Healing
+    # ==========================================================================
+    from backend.agents.validator import validate_artifact
+    from backend.agents.correction import generate_correction_prompt, should_retry_agent, format_correction_summary
+    
+    # Get retry configuration
+    max_retries = 3
+    retry_count = state.get("retry_counts", {}).get("service_exposure", 0)
+    
+    # Validate the generated service.cds
+    service_artifact = next((f for f in generated_files if f["path"] == "srv/service.cds"), None)
+    if service_artifact and llm_success:
+        validation_results = validate_artifact(service_artifact["path"], service_artifact["content"])
+        
+        if any(result.has_errors for result in validation_results):
+            if should_retry_agent(validation_results, retry_count, max_retries):
+                log_progress(state, f"Validation found errors. Attempting correction (retry {retry_count + 1}/{max_retries})...")
+                
+                if "retry_counts" not in state:
+                    state["retry_counts"] = {}
+                state["retry_counts"]["service_exposure"] = retry_count + 1
+                state["needs_correction"] = True
+                
+                if "correction_history" not in state:
+                    state["correction_history"] = []
+                state["correction_history"].append({
+                    "agent": "service_exposure",
+                    "retry": retry_count + 1,
+                    "errors_found": sum(r.error_count for r in validation_results),
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+                
+                for result in validation_results:
+                    for issue in result.issues:
+                        if issue.severity.value == "error":
+                            log_progress(state, f"  - {issue.message}")
+                
+                state["artifacts_srv"] = []
+                return state
+            else:
+                log_progress(state, "⚠️ Max retries reached. Some validation errors remain.")
+                for result in validation_results:
+                    for issue in result.issues:
+                        if issue.severity.value == "error":
+                            errors.append({
+                                "agent": "service_exposure",
+                                "code": issue.code or "VALIDATION_ERROR",
+                                "message": issue.message,
+                                "field": None,
+                                "severity": "warning"
+                            })
+        else:
+            if retry_count > 0:
+                log_progress(state, f"✅ Validation passed after {retry_count} correction(s)")
+                summary = format_correction_summary("service_exposure", retry_count, retry_count, retry_count)
+                if "auto_fixed_errors" not in state:
+                    state["auto_fixed_errors"] = []
+                state["auto_fixed_errors"].append({
+                    "agent": "service_exposure",
+                    "summary": summary,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+            else:
+                log_progress(state, "✅ Validation passed on first attempt")
+
+    state["needs_correction"] = False
+    
+    # ==========================================================================
     # Update state
     # ==========================================================================
     state["artifacts_srv"] = state.get("artifacts_srv", []) + generated_files
@@ -401,6 +451,7 @@ using from './annotations';
         "completed_at": datetime.utcnow().isoformat(),
         "duration_ms": None,
         "error": None,
+        "retry_count": retry_count,
         "logs": state.get("current_logs", []),
     }]
     

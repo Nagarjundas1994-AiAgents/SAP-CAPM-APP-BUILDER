@@ -87,13 +87,21 @@ export default function AgentProgress({
                   {agent.description}
                 </p>
 
-                {/* Duration */}
-                {execution?.duration_ms && (
-                  <p className="text-xs text-gray-500 mt-1 flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-gray-700" />
-                    Completed in {(execution.duration_ms / 1000).toFixed(2)}s
-                  </p>
-                )}
+                {/* Duration & Retries */}
+                <div className="flex items-center gap-3 mt-1">
+                  {execution?.duration_ms && (
+                    <p className="text-xs text-gray-500 flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-gray-700" />
+                      Completed in {(execution.duration_ms / 1000).toFixed(2)}s
+                    </p>
+                  )}
+                  {execution?.retry_count && execution.retry_count > 0 && (
+                    <p className="text-xs text-amber-400 flex items-center gap-1 bg-amber-400/10 px-1.5 py-0.5 rounded border border-amber-400/20">
+                      <AlertCircle className="w-3 h-3" />
+                      Auto-corrected ({execution.retry_count} {execution.retry_count === 1 ? 'retry' : 'retries'})
+                    </p>
+                  )}
+                </div>
 
                 {/* Error */}
                 {execution?.error && (

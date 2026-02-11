@@ -91,16 +91,29 @@ export function FioriPreview({ entities, mainEntityName, projectName }: FioriPre
       const row: Record<string, any> = {};
       entity.fields.forEach(field => {
         const type = (field.type || 'String').toLowerCase();
+        const name = (field.name || '').toLowerCase();
+
         if (field.name === 'ID' || field.key) {
-          row[field.name] = `${entity.name.substring(0, 3).toUpperCase()}-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
+          if (type === 'uuid') {
+            row[field.name] = `550e8400-e29b-41d4-a716-${446655440000 + i}`;
+          } else {
+            row[field.name] = `${entity.name.substring(0, 3).toUpperCase()}-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
+          }
         } else if (type === 'string' || type === 'largestring') {
-          row[field.name] = `Sample ${field.name} ${i + 1}`;
+          if (name.includes('status') || name.includes('category')) {
+            const options = ['Draft', 'In Progress', 'Completed', 'Approved', 'Rejected'];
+            row[field.name] = options[i % options.length];
+          } else {
+            row[field.name] = `Sample ${field.name} ${i + 1}`;
+          }
         } else if (type === 'integer' || type.startsWith('int')) {
           row[field.name] = (i + 1) * 100;
         } else if (type === 'boolean') {
           row[field.name] = i % 2 === 0;
         } else if (type === 'date') {
           row[field.name] = new Date(2024, 0, 15 + i).toISOString().split('T')[0];
+        } else if (type === 'datetime' || type === 'timestamp' || type === 'managed') {
+          row[field.name] = new Date(2024, 0, 15 + i, 10, 30).toISOString().replace('T', ' ').substring(0, 19);
         } else {
           row[field.name] = `Value ${i + 1}`;
         }

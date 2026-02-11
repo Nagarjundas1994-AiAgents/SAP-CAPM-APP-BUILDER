@@ -256,6 +256,14 @@ class BuilderState(TypedDict, total=False):
     current_logs: list[str]
     
     # -------------------------------------------------------------------------
+    # Self-Healing / Retry Tracking
+    # -------------------------------------------------------------------------
+    retry_counts: dict[str, int]  # {agent_name: retry_count}
+    correction_history: list[dict[str, Any]]  # Track what was corrected
+    auto_fixed_errors: list[dict[str, Any]]  # Success stories for analytics
+    needs_correction: bool  # Flag to trigger retry in workflow
+    
+    # -------------------------------------------------------------------------
     # Validation Results
     # -------------------------------------------------------------------------
     validation_errors: list[ValidationError]

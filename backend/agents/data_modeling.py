@@ -30,61 +30,59 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 DATA_MODELING_SYSTEM_PROMPT = """You are an expert SAP CAP (Cloud Application Programming Model) data architect.
-Your task is to generate complete, production-ready CDS (Core Data Services) schema files.
+Your task is to generate complete, production-ready, enterprise-grade CDS (Core Data Services) schema files.
 
 STRICT RULES:
-1. ONLY use official SAP CDS syntax and patterns from the SAP CAP documentation
-2. Use @sap/cds/common aspects correctly: cuid (for UUID keys), managed (for createdAt/modifiedAt), temporal
-3. Follow SAP naming conventions: PascalCase for entities, camelCase for fields
-4. Use proper CDS types: String, Integer, Decimal, Boolean, Date, DateTime, Time, UUID, LargeString, LargeBinary
-5. Use Composition of many for parent-child (lifecycle-dependent) relationships
-6. Use Association to for independent entity references
-7. Add proper annotations: @title, @description, @readonly, @mandatory
-8. Add semantic annotations where appropriate: @Semantics.amount.currencyCode, @Semantics.currencyCode
-9. Include proper using statements for aspects from '@sap/cds/common'
-10. Generate realistic, domain-specific sample data in CSV format
+1. ONLY use official SAP CDS syntax and patterns.
+2. Naming: PascalCase for entities, camelCase for fields. Namespace must be consistent.
+3. Standard Aspects: 
+   - Use 'cuid' for all primary entities.
+   - Use 'managed' for change tracking.
+   - Use 'temporal' for data that needs versioning.
+4. Types: String, Integer, Decimal, Date, DateTime, Boolean, UUID, LargeString.
+5. Value Helps & Enums:
+   - Use CDS Enums for fields with fixed values (e.g. type Status : String enum { New; InProcess; Closed; }).
+   - Define 'CodeList' entities for more dynamic value helps.
+6. Relationships:
+   - Use 'Composition of many' for internal sub-entities (e.g. Order -> OrderItems).
+   - Use 'Association to' for external references.
+7. Annotations:
+   - Mandatory: @title, @description.
+   - Functional: @readonly, @mandatory, @assert.range, @assert.format.
+   - UI Prep: @Common.Text, @Common.ValueList.
+8. Semantics: Use @Semantics.amount.currencyCode: 'currency' and @Semantics.currencyCode: true.
 
 OUTPUT FORMAT:
-Return your response as valid JSON with this structure:
+Return a JSON object:
 {
-  "schema_cds": "... full content of db/schema.cds ...",
+  "schema_cds": "... CDS content ...",
   "sample_data": [
-    {"filename": "db/data/namespace-EntityName.csv", "content": "...CSV content..."}
+    {"filename": "db/data/namespace-Entity.csv", "content": "... CSV data (5-10 rows) ..."}
   ]
 }
-
-IMPORTANT: The schema_cds value must be a complete, valid CDS file that can be directly used in a SAP CAP project.
-Do NOT include markdown code fences in the JSON values. Return ONLY the JSON object."""
+Return ONLY the JSON."""
 
 
-SCHEMA_GENERATION_PROMPT = """Generate a complete db/schema.cds file and sample CSV data for the following SAP CAP project.
+SCHEMA_GENERATION_PROMPT = """Generate a complete db/schema.cds file and realistic sample CSV data for a high-quality SAP CAP project.
 
-Project Name: {project_name}
-Project Namespace: {namespace}
-Project Description: {description}
+Project: {project_name} ({namespace})
+Description: {description}
 
-Entities to generate:
-{entities_json}
-
-Relationships between entities:
-{relationships_json}
-
-Business Rules to consider:
-{business_rules_json}
+Entities: {entities_json}
+Relationships: {relationships_json}
+Rules: {business_rules_json}
 
 Requirements:
-1. Use the namespace '{namespace}' at the top of the schema
-2. Import appropriate aspects from '@sap/cds/common' (cuid, managed, temporal)
-3. For each entity, generate ALL the fields listed above with correct CDS types
-4. Add proper associations and compositions based on the relationships
-5. Add meaningful annotations (@title, @description) for each field
-6. For currency/amount fields, add semantic annotations
-7. Add proper default values where specified
-8. Generate 3-5 rows of realistic sample data per entity in CSV format
-9. Use semicolons as CSV delimiters (SAP CAP convention)
-10. Make the sample data realistic and domain-specific (not just "Sample X 1")
+1. Namespace: {namespace}
+2. Include 'using { cuid, managed } from '@sap/cds/common';'
+3. Use enums for status/priority fields.
+4. Add @title and @description to EVERY field.
+5. Use '@changelog' or 'managed' aspects for audit trails.
+6. For associations, ensure the target entity exists in the model.
+7. Generate 5-10 rows of high-quality sample data per entity.
+8. Use semicolons for CSV separators.
 
-Respond with ONLY valid JSON matching the expected schema."""
+The output must be a valid SAP CAP project structure for the 'db' layer."""
 
 
 # =============================================================================
@@ -285,7 +283,7 @@ def generate_sample_data_csv(entity: EntityDefinition) -> tuple[str, str]:
     
     # Generate sample rows
     rows = []
-    for i in range(3):
+    for i in range(5):
         row_values = []
         for field in fields:
             field_name = field.get("name", "")
@@ -567,6 +565,90 @@ async def data_modeling_agent(state: BuilderState) -> BuilderState:
         logger.error(f"Failed to generate index.cds: {e}")
     
     # ==========================================================================
+    # Validation & Self-Healing
+    # ==========================================================================
+    from backend.agents.validator import validate_artifact
+    from backend.agents.correction import generate_correction_prompt, should_retry_agent, format_correction_summary
+    
+    # Get retry configuration
+    max_retries = 3  # Could be from config
+    retry_count = state.get("retry_counts", {}).get("data_modeling", 0)
+    
+    # Validate the generated schema.cds only
+    schema_artifact = next((f for f in generated_files if f["path"] == "db/schema.cds"), None)
+    if schema_artifact and llm_success:  # Only validate LLM-generated content
+        validation_results = validate_artifact(schema_artifact["path"], schema_artifact["content"])
+        
+        if any(result.has_errors for result in validation_results):
+            # Validation failed
+            if should_retry_agent(validation_results, retry_count, max_retries):
+                # Need to retry
+                log_progress(state, f"Validation found errors. Attempting correction (retry {retry_count + 1}/{max_retries})...")
+                
+                # Update retry count
+                if "retry_counts" not in state:
+                    state["retry_counts"] = {}
+                state["retry_counts"]["data_modeling"] = retry_count + 1
+                
+                # Mark state for retry
+                state["needs_correction"] = True
+                
+                # Record correction attempt
+                if "correction_history" not in state:
+                    state["correction_history"] = []
+                state["correction_history"].append({
+                    "agent": "data_modeling",
+                    "retry": retry_count + 1,
+                    "errors_found": sum(r.error_count for r in validation_results),
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+                
+                # Log the specific errors
+                for result in validation_results:
+                    for issue in result.issues:
+                        if issue.severity.value == "error":
+                            log_progress(state, f"  - {issue.message}")
+                
+                # Prepare for re-run by keeping the state but clearing generated_files
+                # The workflow will loop back and re-run this agent
+                state["artifacts_db"] = []  # Clear for retry
+                
+                # Return early - workflow will loop back
+                log_progress(state, "Preparing to retry with corrections...")
+                return state
+            else:
+                # Max retries reached - log and continue with what we have
+                log_progress(state, f"⚠️ Max retries reached. Some validation errors remain.")
+                for result in validation_results:
+                    for issue in result.issues:
+                        if issue.severity.value == "error":
+                            errors.append({
+                                "agent": "data_modeling",
+                                "code": issue.code or "VALIDATION_ERROR",
+                                "message": issue.message,
+                                "field": None,
+                                "severity": "warning"  # Downgrade to warning since we tried
+                            })
+        else:
+            # Validation passed
+            if retry_count > 0:
+                # We auto-fixed errors!
+                log_progress(state, f"✅ Validation passed after {retry_count} correction(s)")
+                summary = format_correction_summary("data_modeling", retry_count, retry_count, retry_count)
+                if "auto_fixed_errors" not in state:
+                    state["auto_fixed_errors"] = []
+                state["auto_fixed_errors"].append({
+                    "agent": "data_modeling",
+                    "summary": summary,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+            else:
+                log_progress(state, "✅ Validation passed on first attempt")
+    
+    # Clear retry flag
+    state["needs_correction"] = False
+    
+    # ==========================================================================
     # Update state
     # ==========================================================================
     state["artifacts_db"] = generated_files
@@ -580,6 +662,7 @@ async def data_modeling_agent(state: BuilderState) -> BuilderState:
         "completed_at": datetime.utcnow().isoformat(),
         "duration_ms": None,
         "error": None if not errors else str(errors[0]["message"]),
+        "retry_count": retry_count,
         "logs": state.get("current_logs", []),
     }]
     

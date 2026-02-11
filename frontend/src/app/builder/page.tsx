@@ -70,9 +70,12 @@ const AGENTS = [
 
 // Domain templates
 const DOMAIN_TEMPLATES = [
-  { id: 'sales', name: 'Sales & Distribution', icon: Briefcase, entities: ['Customer', 'SalesOrder', 'Product'] },
-  { id: 'inventory', name: 'Inventory Management', icon: Database, entities: ['Material', 'Stock', 'Warehouse'] },
-  { id: 'hr', name: 'Human Resources', icon: Briefcase, entities: ['Employee', 'Department', 'Leave'] },
+  { id: 'hr', name: 'Human Resources', icon: Briefcase, entities: ['Employee', 'Department', 'LeaveRequest', 'TimeEntry', 'Position', 'PayGrade'] },
+  { id: 'crm', name: 'Customer Relationship', icon: Briefcase, entities: ['Account', 'Contact', 'Opportunity', 'Activity', 'Lead', 'Campaign'] },
+  { id: 'ecommerce', name: 'E-Commerce', icon: Palette, entities: ['Product', 'Category', 'Order', 'OrderItem', 'Customer', 'Review'] },
+  { id: 'inventory', name: 'Inventory Management', icon: Database, entities: ['Product', 'Warehouse', 'InventoryLevel', 'StockMovement', 'Supplier'] },
+  { id: 'finance', name: 'Finance & Accounting', icon: Server, entities: ['ExpenseReport', 'ExpenseItem', 'Budget', 'CostCenter', 'Invoice'] },
+  { id: 'logistics', name: 'Logistics & Shipping', icon: Rocket, entities: ['Shipment', 'ShipmentItem', 'Route', 'Carrier', 'TrackingEvent'] },
   { id: 'custom', name: 'Custom Domain', icon: Puzzle, entities: [] },
 ];
 
