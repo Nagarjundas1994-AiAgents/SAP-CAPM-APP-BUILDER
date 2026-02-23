@@ -99,6 +99,30 @@ class Settings(BaseSettings):
     artifacts_path: str = "./artifacts"
     templates_path: str = "./backend/templates"
 
+    # ==========================================================================
+    # Production Settings
+    # ==========================================================================
+    # API key for builder access (leave empty for open access in dev)
+    api_key: str | None = None
+
+    # Rate limiting (requests per minute per IP)
+    rate_limit_rpm: int = 60
+    rate_limit_burst: int = 10
+
+    # Redis for caching/rate limiting (optional)
+    redis_url: str | None = None
+
+    # Logging
+    log_format: Literal["text", "json"] = "text"
+    log_level: str = "INFO"
+
+    # File size limits
+    max_generation_size_mb: int = 50
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env == "production"
+
 
 @lru_cache
 def get_settings() -> Settings:

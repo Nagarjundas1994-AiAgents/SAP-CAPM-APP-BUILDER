@@ -141,87 +141,190 @@ def _parse_llm_response(response_text: str) -> dict | None:
 DEFAULT_ROLES = [
     {"name": "Viewer", "description": "Read-only access", "scopes": ["read"]},
     {"name": "Editor", "description": "Read and write access", "scopes": ["read", "write"]},
-    {"name": "Admin", "description": "Full access", "scopes": ["read", "write", "delete", "admin"]},
+    {"name": "Admin", "description": "Full administrative access", "scopes": ["read", "write", "delete", "admin"]},
 ]
 
 
+def _humanize(name: str) -> str:
+    words = re.findall(r'[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)', name)
+    return " ".join(w.capitalize() for w in words) if words else name
+
+
+def _has_field(entity: dict, *names: str) -> bool:
+    field_names_lower = {f.get("name", "").lower() for f in entity.get("fields", [])}
+    return any(n.lower() in field_names_lower for n in names)
+
+
 def generate_xs_security_json(state: BuilderState) -> str:
+    """Generate xs-security.json with scopes, role-templates, role-collections, and user attributes."""
     project_name = state.get("project_name", "App")
-    namespace = state.get("project_namespace", "com.company.app")
     xsappname = project_name.lower().replace(" ", "-").replace("_", "-")
-    
-    scopes = []
-    for scope in ["read", "write", "delete", "admin"]:
-        scopes.append({"name": f"$XSAPPNAME.{scope}", "description": f"{scope.capitalize()} access"})
-    
+
+    scopes = [
+        {"name": f"$XSAPPNAME.read", "description": "Read access to application data"},
+        {"name": f"$XSAPPNAME.write", "description": "Write access to application data"},
+        {"name": f"$XSAPPNAME.delete", "description": "Delete application data"},
+        {"name": f"$XSAPPNAME.admin", "description": "Full administrative access"},
+    ]
+
     role_templates = []
     role_collections = []
     for role in DEFAULT_ROLES:
         role_templates.append({
             "name": role["name"],
             "description": role["description"],
-            "scope-references": [f"$XSAPPNAME.{s}" for s in role["scopes"]]
+            "scope-references": [f"$XSAPPNAME.{s}" for s in role["scopes"]],
+            "attribute-references": []
         })
         role_collections.append({
             "name": f"{project_name}_{role['name']}",
             "description": role["description"],
             "role-template-references": [f"$XSAPPNAME.{role['name']}"]
         })
-    
+
     xs_security = {
         "xsappname": xsappname,
         "tenant-mode": "dedicated",
         "scopes": scopes,
+        "attributes": [
+            {"name": "Department", "description": "User department for attribute-based access", "valueType": "string"}
+        ],
         "role-templates": role_templates,
-        "role-collections": role_collections
+        "role-collections": role_collections,
+        "oauth2-configuration": {
+            "token-validity": 43200,
+            "redirect-uris": ["https://*.cfapps.*.hana.ondemand.com/**"]
+        }
     }
     return json.dumps(xs_security, indent=4)
 
 
 def generate_auth_annotations_cds(state: BuilderState) -> str:
+    """Generate CDS authorization annotations with instance-based auth and GDPR."""
     entities = state.get("entities", [])
-    lines = ["// Authorization Annotations", "", "using from './service';", ""]
+    relationships = state.get("relationships", [])
+
+    lines = [
+        "// ═══════════════════════════════════════════════════════════",
+        "// Authorization & Data Privacy Annotations",
+        "// ═══════════════════════════════════════════════════════════",
+        "",
+        "using from './service';",
+        ""
+    ]
+
     for entity in entities:
         name = entity.get("name", "Entity")
+        has_managed = "managed" in entity.get("aspects", [])
+        has_personal_data = _has_field(entity, "email", "phone", "firstName", "lastName", "address")
+
+        # Determine if entity is a child (composition target)
+        is_child = any(
+            r.get("type") == "composition" and r.get("target_entity") == name
+            for r in relationships
+        )
+
+        lines.append(f"// ── {name} ──────────────────────────────────")
         lines.append(f"annotate {name} with @(restrict: [")
-        lines.append("    { grant: 'READ', to: 'Viewer' },")
-        lines.append("    { grant: ['READ', 'WRITE'], to: 'Editor' },")
-        lines.append("    { grant: '*', to: 'Admin' }")
-        lines.append("]);")
+        lines.append(f"    {{ grant: 'READ', to: 'Viewer' }},")
+
+        # Instance-based auth: editors can only modify their own records
+        if has_managed and not is_child:
+            lines.append(f"    {{ grant: ['READ', 'WRITE'], to: 'Editor', where: 'createdBy = $user' }},")
+        else:
+            lines.append(f"    {{ grant: ['READ', 'WRITE'], to: 'Editor' }},")
+
+        lines.append(f"    {{ grant: '*', to: 'Admin' }}")
+        lines.append(f"]);")
+
+        # GDPR / PersonalData annotations
+        if has_personal_data:
+            lines.append(f"")
+            lines.append(f"// GDPR: Personal data annotations")
+            lines.append(f"annotate {name} with @PersonalData: {{")
+            lines.append(f"    DataSubjectRole: '{name}',")
+            lines.append(f"    EntitySemantics: 'DataSubject'")
+            lines.append(f"}};")
+
+            # Field-level personal data
+            personal_fields = []
+            for f in entity.get("fields", []):
+                fn = f.get("name", "").lower()
+                if fn in ("email", "emailaddress", "mail"):
+                    personal_fields.append(f"    {f.get('name')} @PersonalData.IsPotentiallyPersonal;")
+                elif fn in ("phone", "phonenumber", "telephone", "mobile"):
+                    personal_fields.append(f"    {f.get('name')} @PersonalData.IsPotentiallyPersonal;")
+                elif fn in ("firstname", "lastname", "name", "fullname"):
+                    personal_fields.append(f"    {f.get('name')} @PersonalData.IsPotentiallyPersonal;")
+                elif fn in ("address", "street", "city"):
+                    personal_fields.append(f"    {f.get('name')} @PersonalData.IsPotentiallyPersonal;")
+
+            if personal_fields:
+                lines.append(f"annotate {name} with {{")
+                lines.extend(personal_fields)
+                lines.append(f"}};")
+
         lines.append("")
+
     return "\n".join(lines)
 
 
 def generate_mock_users_csv() -> str:
     return """username;password;roles
-viewer-user;pass123;Viewer
-editor-user;pass123;Editor
-admin-user;pass123;Admin"""
+viewer-user;viewer123;Viewer
+editor-user;editor123;Editor,Viewer
+admin-user;admin123;Admin,Editor,Viewer
+manager-user;manager123;Admin,Viewer"""
 
 
 def generate_auth_cds(state: BuilderState) -> str:
-    return """// Authentication Configuration
+    """Generate srv/auth.cds with service-level authentication requirement."""
+    project_name = state.get("project_name", "App")
+    service_name = "".join(
+        word.capitalize()
+        for word in project_name.replace("-", " ").replace("_", " ").split()
+    )
+    service_name = f"{service_name}Service"
+
+    return f"""// Authentication Configuration
 using from './service';
 
-// Require authentication for the service
-// annotate <ServiceName> with @(requires: 'authenticated-user');
+// Require authentication for the entire service
+annotate {service_name} with @(requires: 'authenticated-user');
 """
 
 
 def generate_cdsrc_json(state: BuilderState) -> str:
+    """Generate .cdsrc.json with production and development auth configs."""
     return json.dumps({
         "[production]": {
             "requires": {
-                "auth": {"kind": "xsuaa"}
+                "auth": {"kind": "xsuaa"},
+                "db": {"kind": "hana", "impl": "@sap/cds/libx/_runtime/hana/Service.js"}
             }
         },
         "[development]": {
             "requires": {
-                "auth": {"kind": "mocked", "users": {
-                    "admin-user": {"password": "pass123", "roles": ["Admin", "Viewer", "Editor"]},
-                    "editor-user": {"password": "pass123", "roles": ["Editor", "Viewer"]},
-                    "viewer-user": {"password": "pass123", "roles": ["Viewer"]}
-                }}
+                "auth": {
+                    "kind": "mocked",
+                    "users": {
+                        "admin-user": {
+                            "password": "admin123",
+                            "roles": ["Admin", "Editor", "Viewer"],
+                            "attr": {"Department": "IT"}
+                        },
+                        "editor-user": {
+                            "password": "editor123",
+                            "roles": ["Editor", "Viewer"],
+                            "attr": {"Department": "Sales"}
+                        },
+                        "viewer-user": {
+                            "password": "viewer123",
+                            "roles": ["Viewer"],
+                            "attr": {"Department": "HR"}
+                        }
+                    }
+                }
             }
         }
     }, indent=4)

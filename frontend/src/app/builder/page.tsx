@@ -7,6 +7,7 @@ import AgentProgress from '@/components/AgentProgress';
 import PlanReview from '@/components/PlanReview';
 import ArtifactEditor from '@/components/ArtifactEditor';
 import { FioriPreview } from '@/components/FioriPreview';
+import ChatPanel, { ChatMessage } from '@/components/ChatPanel';
 import {
   createSession,
   updateSession,
@@ -18,6 +19,9 @@ import {
   approvePlan,
   getGenerationStreamUrl,
   updateArtifact,
+  sendChatPrompt,
+  getChatHistory,
+  getRegenerateStreamUrl,
   Session,
   GenerationResult,
   AgentExecution,
@@ -40,6 +44,7 @@ import {
   Edit3,
   Layout,
   ArrowRight,
+  MessageSquare,
 } from 'lucide-react';
 
 // Wizard steps - now includes Plan Review
@@ -94,6 +99,12 @@ export default function BuilderPage() {
   const [logs, setLogs] = useState<Record<string, string>>({});
   const [activeTab, setActiveTab] = useState<'preview' | 'code' | 'logs'>('preview');
   const [validationErrors, setValidationErrors] = useState<ValidationError[]>([]);
+
+  // Chat state (post-generation modification)
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [isChatProcessing, setIsChatProcessing] = useState(false);
+  const [isRegenerating, setIsRegenerating] = useState(false);
+  const [showChatPanel, setShowChatPanel] = useState(false);
 
   // Form state
   const [projectName, setProjectName] = useState('');
@@ -360,6 +371,136 @@ export default function BuilderPage() {
       result.artifacts_deployment.length +
       result.artifacts_docs.length
     );
+  };
+
+  // === Chat Handlers (post-generation modification) ===
+  const handleChatSend = async (message: string) => {
+    if (!session) return;
+
+    // Add user message optimistically
+    const userMsg: ChatMessage = {
+      role: 'user',
+      message,
+      timestamp: new Date().toISOString(),
+    };
+    setChatMessages(prev => [...prev, userMsg]);
+    setIsChatProcessing(true);
+
+    try {
+      const response = await sendChatPrompt(session.id, message);
+
+      // Add assistant response
+      const assistantMsg: ChatMessage = {
+        role: 'assistant',
+        message: response.message,
+        entities_preview: response.entities_preview,
+        suggested_followups: response.suggested_followups,
+        timestamp: response.timestamp,
+      };
+      setChatMessages(prev => [...prev, assistantMsg]);
+
+      // Update the plan entities for live preview
+      if (response.entities_preview && response.entities_preview.length > 0) {
+        setPlan(prev => prev ? {
+          ...prev,
+          entities: response.entities_preview as any,
+        } : prev);
+        // Update entity list for other UI elements
+        setEntities(response.entities_preview.map((e: any) => e.name));
+        if (response.entities_preview.length > 0) {
+          setFioriMainEntity(response.entities_preview[0].name);
+        }
+      }
+    } catch (error) {
+      console.error('Chat error:', error);
+      const errMsg: ChatMessage = {
+        role: 'assistant',
+        message: `Sorry, something went wrong: ${error instanceof Error ? error.message : 'Unknown error'}. Please try again.`,
+        timestamp: new Date().toISOString(),
+      };
+      setChatMessages(prev => [...prev, errMsg]);
+    } finally {
+      setIsChatProcessing(false);
+    }
+  };
+
+  const handleRegenerate = async () => {
+    if (!session) return;
+
+    setIsRegenerating(true);
+    setAgentHistory([]);
+    setCurrentAgent('requirements');
+    setLogs({});
+    setValidationErrors([]);
+
+    try {
+      const streamUrl = getRegenerateStreamUrl(session.id);
+      const response = await fetch(streamUrl, { method: 'POST' });
+
+      if (!response.ok) {
+        throw new Error('Failed to start regeneration');
+      }
+
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+
+      if (!reader) throw new Error('No response body');
+
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.type === 'agent_start') {
+              setCurrentAgent(data.agent);
+            } else if (data.type === 'agent_complete') {
+              setAgentHistory(data.agent_history || []);
+            } else if (data.type === 'workflow_complete') {
+              setAgentHistory(data.agent_history || []);
+              setCurrentAgent(null);
+              const artifacts = await getArtifacts(session.id);
+              setResult(artifacts);
+              // Add system message about successful regeneration
+              const sysMsg: ChatMessage = {
+                role: 'assistant',
+                message: '✅ App regenerated successfully! The preview and artifacts have been updated with your changes.',
+                timestamp: new Date().toISOString(),
+                suggested_followups: ['Make more changes', 'Download the project'],
+              };
+              setChatMessages(prev => [...prev, sysMsg]);
+            } else if (data.type === 'error' || data.type === 'workflow_error') {
+              console.error('Regeneration error:', data.message || data.error);
+              const errMsg: ChatMessage = {
+                role: 'assistant',
+                message: `❌ Regeneration failed: ${data.message || data.error}`,
+                timestamp: new Date().toISOString(),
+              };
+              setChatMessages(prev => [...prev, errMsg]);
+            }
+          } catch (e) {
+            // skip unparseable lines
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Regeneration failed:', error);
+      const errMsg: ChatMessage = {
+        role: 'assistant',
+        message: `❌ Regeneration failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        timestamp: new Date().toISOString(),
+      };
+      setChatMessages(prev => [...prev, errMsg]);
+    } finally {
+      setIsRegenerating(false);
+    }
   };
 
   // Render step content
@@ -767,12 +908,12 @@ export default function BuilderPage() {
           </div>
         );
 
-      // Step 8: Download
+      // Step 8: Download & Modify
       case 8:
         return (
           <div className="space-y-6">
-            <div className="text-center py-8">
-              <CheckCircle2 className="w-16 h-16 text-green-400 mx-auto mb-4" />
+            <div className="text-center py-6">
+              <CheckCircle2 className="w-14 h-14 text-green-400 mx-auto mb-3" />
               <h2 className="text-xl font-bold text-white mb-2">
                 Generation Complete!
               </h2>
@@ -781,13 +922,13 @@ export default function BuilderPage() {
               </p>
             </div>
 
-            {/* Tabbed View: Files vs Preview */}
+            {/* Tabbed View: Files vs Preview vs Chat */}
             <div className="flex justify-center mb-6">
               <div className="flex bg-white/5 p-1 rounded-xl border border-white/10">
                 <button
-                  onClick={() => setShowPreview(false)}
-                  className={`px-6 py-2 rounded-lg text-sm font-medium transition-all ${
-                    !showPreview ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'
+                  onClick={() => { setShowPreview(false); setShowChatPanel(false); }}
+                  className={`px-5 py-2 rounded-lg text-sm font-medium transition-all ${
+                    !showPreview && !showChatPanel ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'
                   }`}
                 >
                   <div className="flex items-center gap-2">
@@ -796,21 +937,55 @@ export default function BuilderPage() {
                   </div>
                 </button>
                 <button
-                  onClick={() => setShowPreview(true)}
-                  className={`px-6 py-2 rounded-lg text-sm font-medium transition-all ${
-                    showPreview ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'
+                  onClick={() => { setShowPreview(true); setShowChatPanel(false); }}
+                  className={`px-5 py-2 rounded-lg text-sm font-medium transition-all ${
+                    showPreview && !showChatPanel ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'
                   }`}
                 >
                   <div className="flex items-center gap-2">
                     <Layout className="w-4 h-4" />
-                    App Preview
+                    Preview
+                  </div>
+                </button>
+                <button
+                  onClick={() => { setShowChatPanel(true); setShowPreview(false); }}
+                  className={`px-5 py-2 rounded-lg text-sm font-medium transition-all ${
+                    showChatPanel ? 'bg-gradient-to-r from-purple-600 to-blue-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <MessageSquare className="w-4 h-4" />
+                    Modify with AI
+                    <span className="text-[10px] px-1.5 py-0.5 bg-white/20 rounded-full">✨</span>
                   </div>
                 </button>
               </div>
             </div>
 
-            {/* File breakdown / Preview */}
-            {result && (
+            {/* Content area */}
+            {showChatPanel && session ? (
+              /* Chat + Preview split layout */
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                <div className="h-[600px]">
+                  <ChatPanel
+                    sessionId={session.id}
+                    messages={chatMessages}
+                    onSendMessage={handleChatSend}
+                    onRegenerate={handleRegenerate}
+                    isProcessing={isChatProcessing}
+                    isRegenerating={isRegenerating}
+                  />
+                </div>
+                <div className="h-[600px] overflow-auto">
+                  <FioriPreview
+                    entities={plan?.entities || []}
+                    mainEntityName={fioriMainEntity}
+                    projectName={projectName}
+                  />
+                </div>
+              </div>
+            ) : result && (
+              /* File breakdown / Preview */
               <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
                 {!showPreview ? (
                   <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -832,20 +1007,20 @@ export default function BuilderPage() {
                   </div>
                 ) : (
                   <div className="max-w-5xl mx-auto">
-                    <FioriPreview 
-                      entities={plan?.entities || []} 
-                      mainEntityName={fioriMainEntity} 
-                      projectName={projectName} 
+                    <FioriPreview
+                      entities={plan?.entities || []}
+                      mainEntityName={fioriMainEntity}
+                      projectName={projectName}
                     />
                   </div>
                 )}
               </div>
             )}
 
-            {/* Download button */}
+            {/* Action buttons */}
             {session && (
               <div className="flex flex-col items-center gap-4 pt-4">
-                <div className="flex items-center gap-4">
+                <div className="flex items-center gap-4 flex-wrap justify-center">
                   <button
                     onClick={() => setShowArtifactEditor(true)}
                     className="flex items-center gap-2 px-6 py-4 bg-white/5 border border-white/10 rounded-xl font-medium text-white hover:bg-white/10 transition-all"
@@ -853,6 +1028,15 @@ export default function BuilderPage() {
                     <Edit3 className="w-5 h-5 text-blue-400" />
                     Review & Edit Files
                   </button>
+                  {!showChatPanel && (
+                    <button
+                      onClick={() => { setShowChatPanel(true); setShowPreview(false); }}
+                      className="flex items-center gap-2 px-6 py-4 bg-gradient-to-r from-purple-600/20 to-blue-600/20 border border-purple-500/30 rounded-xl font-medium text-white hover:from-purple-600/30 hover:to-blue-600/30 transition-all"
+                    >
+                      <MessageSquare className="w-5 h-5 text-purple-400" />
+                      Modify with AI ✨
+                    </button>
+                  )}
                   <a
                     href={getDownloadUrl(session.id)}
                     className="inline-flex items-center gap-2 px-8 py-4 bg-gradient-to-r from-green-600 to-green-500 rounded-xl font-semibold text-white hover:from-green-500 hover:to-green-400 transition-all shadow-lg shadow-green-500/25"
@@ -862,7 +1046,7 @@ export default function BuilderPage() {
                   </a>
                 </div>
                 <p className="text-xs text-gray-500 italic">
-                  Tip: You can modify the generated code above before downloading.
+                  Tip: Use "Modify with AI" to refine your app, then regenerate and download.
                 </p>
               </div>
             )}

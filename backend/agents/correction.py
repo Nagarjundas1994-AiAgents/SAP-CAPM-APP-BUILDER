@@ -3,6 +3,8 @@ Correction Prompt Generator
 
 Generates intelligent correction prompts for the LLM when validation fails.
 Includes context from the original task, specific errors, and hints for fixing.
+
+Enhanced with agent-specific hints for all 9 agents and common mistake patterns.
 """
 
 import logging
@@ -31,6 +33,106 @@ Return the corrected code in the same JSON format as before.
 """
 
 
+# =============================================================================
+# Agent-Specific Correction Hints
+# =============================================================================
+
+AGENT_HINTS = {
+    "data_modeling": [
+        "All entities should have a key field (use `key ID : UUID;` or `cuid` aspect)",
+        "Use proper CDS types: String, Integer, Decimal, Boolean, Date, DateTime, UUID",
+        "Include namespace declaration: `namespace com.company.app;`",
+        "Use aspects like `managed` for createdAt/createdBy tracking",
+        "Compositions: `items : Composition of many Items on items.parent = $self;`",
+        "Associations: `category : Association to Categories;`",
+        "Enum types: `type Status : String enum { New; InProcess; Completed; Cancelled; };`",
+        "String lengths: `name : String(100);`",
+        "Annotations: `@mandatory`, `@title: 'Label'`, `@assert.range`",
+    ],
+    "service_exposure": [
+        "Use `@odata.draft.enabled` for root editable entities (not children)",
+        "Proper projection: `entity Orders as projection on db.Orders;`",
+        "Include @UI.HeaderInfo with TypeName and TypeNamePlural",
+        "Include @UI.LineItem with Position and Importance",
+        "Include @UI.Facets with ReferenceFacet targeting @UI.FieldGroup",
+        "@Common.ValueListWithFixedValues for enum fields",
+        "Expose related entities for navigation: entity Items as projection...",
+        "Custom actions: `action approve(ID : UUID) returns String;`",
+    ],
+    "business_logic": [
+        "Use async/await for all handlers",
+        "Use `cds.log('service')` instead of console.log",
+        "Use `req.error(statusCode, message, target)` for validation errors",
+        "Pattern: `module.exports = cds.service.impl(async function() { ... });`",
+        "Always use `this.before()`, `this.after()`, `this.on()` inside the impl",
+        "Draft handlers: `this.before('SAVE', Entity, ...)` for activation validation",
+        "SELECT: `const rows = await SELECT.from(Entity).where({ID})`",
+        "UPDATE: `await UPDATE(Entity).set({status: 'Approved'}).where({ID})`",
+    ],
+    "fiori_ui": [
+        "manifest.json must have 'sap.app', 'sap.ui', 'sap.ui5' sections",
+        "Component.js must extend 'sap/fe/core/AppComponent'",
+        "Routes must match pattern: `EntityName({key}):?query:`",
+        "Target type should be 'Component' with name 'sap.fe.templates.ListReport' or 'sap.fe.templates.ObjectPage'",
+        "FCL config: routing.config.flexibleColumnLayout",
+        "Model 'i18n': type 'sap.ui.model.resource.ResourceModel'",
+        "Default model '': dataSource 'mainService'",
+    ],
+    "security": [
+        "xs-security.json requires 'xsappname' and 'tenant-mode'",
+        "Scopes use '$XSAPPNAME.scopeName' format",
+        "Role templates reference scopes via 'scope-references' array",
+        "@restrict syntax: `@(restrict: [{ grant: 'READ', to: 'Viewer' }])`",
+        "Instance-based: `where: 'createdBy = $user'`",
+        "@PersonalData annotations for GDPR fields",
+    ],
+    "deployment": [
+        "mta.yaml requires '_schema-version', 'ID', 'modules', 'resources'",
+        "package.json must have '@sap/cds' in dependencies",
+        "Include scripts: start, watch, build, deploy",
+        "CDS profiles in package.json: [production] and [development]",
+        "Dockerfile: Use node:18-alpine, expose port 4004",
+        "GitHub Actions: Node.js 18, npm ci, mbt build, cf deploy",
+    ],
+    "extension": [
+        "Extensions should be additive and not break existing functionality",
+        "Custom UI annotations go in srv/annotations.cds",
+        "Custom pages need proper route configuration in manifest.json",
+    ],
+    "validation": [
+        "Run all validators on the final output",
+        "Cross-file consistency: entity names match across schema→service→annotations",
+    ],
+    "requirements": [
+        "Ensure all entities have at least one non-key field",
+        "Entity names should be PascalCase",
+        "Field names should be camelCase",
+    ],
+}
+
+
+# =============================================================================
+# Common Mistake Patterns
+# =============================================================================
+
+COMMON_MISTAKES = {
+    "UNBALANCED_BRACES": "Count all { and } in your output. Each opening brace must have a matching closing brace.",
+    "INVALID_JSON": "Ensure your JSON has no trailing commas, uses double quotes for strings, and has no comments.",
+    "NO_ENTITIES": "Every schema.cds must define at least one entity. Use: entity EntityName { key ID : UUID; }",
+    "MISSING_NAMESPACE": "Add namespace at the top: namespace com.company.app;",
+    "NO_EXPORT": "Service handler must export: module.exports = cds.service.impl(async function() { ... });",
+    "CONSOLE_LOG": "Replace console.log with: const LOG = cds.log('service'); LOG.info('message');",
+    "MISSING_SAP_APP": "manifest.json must include 'sap.app' with id, type, dataSources.",
+    "MISSING_SAP_UI5": "manifest.json must include 'sap.ui5' with routing, models, dependencies.",
+    "MISSING_XSAPPNAME": "xs-security.json must include 'xsappname' field.",
+    "INVALID_TYPE": "Use valid CDS types: String, Integer, Decimal, Boolean, Date, DateTime, UUID, etc.",
+}
+
+
+# =============================================================================
+# Prompt Generator
+# =============================================================================
+
 def generate_correction_prompt(
     agent_name: str,
     original_task: str,
@@ -40,111 +142,69 @@ def generate_correction_prompt(
 ) -> str:
     """
     Generate a correction prompt for the LLM to fix validation errors.
-    
-    Args:
-        agent_name: Name of the agent that generated the code
-        original_task: The original task prompt sent to the agent
-        generated_output: The output that failed validation (usually a dict with file content)
-        validation_results: List of validation results with errors
-        state: Current builder state for context
-        
-    Returns:
-        A detailed correction prompt
     """
     error_context = extract_error_context(validation_results)
-    
-    # Count errors by type
+
     error_count = sum(result.error_count for result in validation_results)
     warning_count = sum(result.warning_count for result in validation_results)
-    
-    # Build the correction prompt
-    prompt_parts = [
+
+    parts = [
         f"## Correction Required for {agent_name}",
         f"",
-        f"Your previous generation had {error_count} error(s) and {warning_count} warning(s).",
+        f"Your generation had **{error_count} error(s)** and {warning_count} warning(s).",
         f"",
         f"### Original Task:",
         f"{original_task}",
         f"",
-        f"### Validation Errors Found:",
+        f"### Validation Errors:",
         f"{error_context}",
         f"",
-        f"### Instructions:",
-        f"1. Fix all ERROR-level issues (these prevent the code from working)",
-        f"2. Address WARNING-level issues if possible (these are best practice violations)",
-        f"3. Maintain the same output structure and format",
+        f"### Fix Instructions:",
+        f"1. Fix all ERROR-level issues",
+        f"2. Address WARNING-level issues if possible",
+        f"3. Maintain the same output JSON structure",
         f"4. Do not change unrelated code",
         f"",
     ]
-    
+
     # Add agent-specific hints
-    if agent_name == "data_modeling":
-        prompt_parts.extend([
-            f"### CDS Best Practices Reminder:",
-            f"- All entities should have a key field",
-            f"- Use proper CDS types: String, Integer, Decimal, UUID, DateTime, etc.",
-            f"- Include namespace declaration at the top",
-            f"- Use aspects like `managed` or `cuid` for common patterns",
-            f"",
-        ])
-    elif agent_name == "service_exposure":
-        prompt_parts.extend([
-            f"### Service Definition Best Practices:",
-            f"- Use `@odata.draft.enabled` for editable entities",
-            f"- Include proper Fiori annotations",
-            f"- Expose related entities for navigation",
-            f"",
-        ])
-    elif agent_name == "business_logic":
-        prompt_parts.extend([
-            f"### Business Logic Best Practices:",
-            f"- Use async/await for all handlers",
-            f"- Use cds.log() instead of console.log",
-            f"- Validate input data before processing",
-            f"- Use req.error() for user-facing errors",
-            f"",
-        ])
-    elif agent_name == "deployment":
-        prompt_parts.extend([
-            f"### Deployment File Best Practices:",
-            f"- Ensure valid JSON syntax",
-            f"- Include all required dependencies",
-            f"- Use proper version constraints (e.g., ^7 for @sap/cds)",
-            f"",
-        ])
-    
-    prompt_parts.append(f"Now, please generate the corrected code:")
-    
-    return "\n".join(prompt_parts)
+    hints = AGENT_HINTS.get(agent_name, [])
+    if hints:
+        parts.append(f"### {agent_name.replace('_', ' ').title()} Best Practices:")
+        for hint in hints:
+            parts.append(f"- {hint}")
+        parts.append("")
+
+    # Add common mistake fixes
+    error_codes = set()
+    for result in validation_results:
+        for issue in result.issues:
+            if issue.code:
+                error_codes.add(issue.code)
+
+    relevant_fixes = {k: v for k, v in COMMON_MISTAKES.items() if k in error_codes}
+    if relevant_fixes:
+        parts.append("### Common Fix Patterns:")
+        for code, fix in relevant_fixes.items():
+            parts.append(f"- **{code}**: {fix}")
+        parts.append("")
+
+    parts.append("Generate the corrected code now:")
+    return "\n".join(parts)
 
 
 def should_retry_agent(validation_results: list[ValidationResult], retry_count: int, max_retries: int = 3) -> bool:
-    """
-    Determine if an agent should retry based on validation results.
-    
-    Args:
-        validation_results: Results from validation
-        retry_count: Current retry count for this agent
-        max_retries: Maximum allowed retries
-        
-    Returns:
-        True if should retry, False otherwise
-    """
-    # Don't retry if we've hit the max
+    """Determine if an agent should retry based on validation results."""
     if retry_count >= max_retries:
         logger.warning(f"Max retries ({max_retries}) reached")
         return False
-    
-    # Check if there are any errors
+
     has_errors = any(result.has_errors for result in validation_results)
-    
     if not has_errors:
         return False
-    
-    # Log retry decision
+
     error_count = sum(result.error_count for result in validation_results)
     logger.info(f"Retry needed: {error_count} errors found, attempt {retry_count + 1}/{max_retries}")
-    
     return True
 
 
@@ -154,16 +214,12 @@ def format_correction_summary(
     fixed_errors: int,
     retry_count: int
 ) -> str:
-    """
-    Format a human-readable summary of the correction process.
-    
-    This will be shown in the UI to let users know what was auto-fixed.
-    """
+    """Format a human-readable summary of the correction process."""
     if fixed_errors == original_errors:
         status = "✅ All errors fixed"
     elif fixed_errors > 0:
         status = f"⚠️ {fixed_errors}/{original_errors} errors fixed"
     else:
-        status = f"❌ Could not fix errors"
-    
-    return f"{agent_name}: {status} (after {retry_count} attempt{'' if retry_count == 1 else 's'})"
+        status = "❌ Could not fix errors"
+
+    return f"{agent_name}: {status} (after {retry_count} attempt{'s' if retry_count != 1 else ''})"

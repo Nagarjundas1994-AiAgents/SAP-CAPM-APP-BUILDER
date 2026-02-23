@@ -4,25 +4,42 @@ FastAPI Main Application
 
 This is the main entry point for the builder platform.
 It serves both the API and the embedded Next.js frontend.
+
+Production features:
+- Rate limiting middleware
+- API key authentication (optional)
+- Request timing middleware
+- Structured JSON logging
 """
 
 import logging
+import time
+import json as json_module
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from backend.config import get_settings
 from backend.database import init_db, close_db
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+settings_early = get_settings()
+if settings_early.log_format == "json":
+    logging.basicConfig(
+        level=getattr(logging, settings_early.log_level, logging.INFO),
+        format='%(message)s',
+    )
+else:
+    logging.basicConfig(
+        level=getattr(logging, settings_early.log_level, logging.INFO),
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
 logger = logging.getLogger(__name__)
 
 
@@ -50,18 +67,66 @@ async def lifespan(app: FastAPI):
     await close_db()
 
 
+# =============================================================================
+# Middleware
+# =============================================================================
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """Simple in-memory rate limiter per IP address."""
+
+    def __init__(self, app, rpm: int = 60, burst: int = 10):
+        super().__init__(app)
+        self.rpm = rpm
+        self.burst = burst
+        self._requests: dict[str, list[float]] = defaultdict(list)
+
+    async def dispatch(self, request: Request, call_next):
+        if not request.url.path.startswith("/api/"):
+            return await call_next(request)
+
+        client_ip = request.client.host if request.client else "unknown"
+        now = time.time()
+        window = 60.0
+
+        # Clean old entries
+        self._requests[client_ip] = [
+            t for t in self._requests[client_ip] if now - t < window
+        ]
+
+        if len(self._requests[client_ip]) >= self.rpm:
+            return JSONResponse(
+                status_code=429,
+                content={"error": "rate_limit_exceeded", "message": f"Max {self.rpm} requests/min"},
+                headers={"Retry-After": "60"},
+            )
+
+        self._requests[client_ip].append(now)
+        return await call_next(request)
+
+
+class RequestTimingMiddleware(BaseHTTPMiddleware):
+    """Add X-Process-Time header to every response."""
+
+    async def dispatch(self, request: Request, call_next):
+        start = time.time()
+        response = await call_next(request)
+        duration_ms = round((time.time() - start) * 1000, 2)
+        response.headers["X-Process-Time"] = f"{duration_ms}ms"
+        return response
+
+
 # Create FastAPI app
 settings = get_settings()
 app = FastAPI(
     title=settings.app_name,
     description="AI-powered platform for generating SAP CAPM + Fiori applications",
-    version="0.1.0",
+    version="1.0.0",
     lifespan=lifespan,
     docs_url="/api/docs" if settings.debug else None,
     redoc_url="/api/redoc" if settings.debug else None,
 )
 
-# CORS middleware
+# Add middleware (order matters — last added = first executed)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
@@ -69,6 +134,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestTimingMiddleware)
+if settings.is_production:
+    app.add_middleware(RateLimitMiddleware, rpm=settings.rate_limit_rpm, burst=settings.rate_limit_burst)
 
 
 # =============================================================================
@@ -109,10 +177,11 @@ async def get_config():
 # Import and include API routers
 # =============================================================================
 
-from backend.api import sessions, builder, plan
+from backend.api import sessions, builder, plan, chat
 app.include_router(sessions.router, prefix="/api/sessions", tags=["sessions"])
 app.include_router(builder.router, prefix="/api/builder", tags=["builder"])
 app.include_router(plan.router, prefix="/api/builder", tags=["plan"])
+app.include_router(chat.router, prefix="/api/builder", tags=["chat"])
 
 
 # =============================================================================

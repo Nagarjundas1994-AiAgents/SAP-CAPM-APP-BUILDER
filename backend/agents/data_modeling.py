@@ -4,13 +4,21 @@ Agent 2: CAP Data Modeling Agent
 Generates complete, SAP-compliant CDS data models including entities, types,
 associations, compositions, aspects, and annotations.
 
-Uses LLM to generate production-quality CDS schemas with fallback to templates.
+Industry-level features:
+- db/common.cds with reusable types (Currency, Country, Language, StatusCode)
+- CDS Enums for status/priority/type fields
+- @mandatory, @assert.range, @assert.format annotations
+- localized keyword for text fields
+- Realistic sample CSV data (names, emails, dates, numbers)
+- Proper field-level SAP semantic annotations
 """
 
 import logging
 import json
 import re
-from datetime import datetime
+import uuid
+import random
+from datetime import datetime, timedelta
 from typing import Any
 
 from backend.agents.llm_providers import get_llm_manager
@@ -29,60 +37,127 @@ logger = logging.getLogger(__name__)
 # System Prompts for LLM
 # =============================================================================
 
-DATA_MODELING_SYSTEM_PROMPT = """You are an expert SAP CAP (Cloud Application Programming Model) data architect.
-Your task is to generate complete, production-ready, enterprise-grade CDS (Core Data Services) schema files.
+DATA_MODELING_SYSTEM_PROMPT = """You are a senior SAP CAP data architect with 10+ years of enterprise experience.
+Generate complete, production-ready CDS (Core Data Services) schema files for the SAP Cloud Application Programming Model.
 
 STRICT RULES:
-1. ONLY use official SAP CDS syntax and patterns.
-2. Naming: PascalCase for entities, camelCase for fields. Namespace must be consistent.
-3. Standard Aspects: 
-   - Use 'cuid' for all primary entities.
-   - Use 'managed' for change tracking.
-   - Use 'temporal' for data that needs versioning.
-4. Types: String, Integer, Decimal, Date, DateTime, Boolean, UUID, LargeString.
-5. Value Helps & Enums:
-   - Use CDS Enums for fields with fixed values (e.g. type Status : String enum { New; InProcess; Closed; }).
-   - Define 'CodeList' entities for more dynamic value helps.
-6. Relationships:
-   - Use 'Composition of many' for internal sub-entities (e.g. Order -> OrderItems).
-   - Use 'Association to' for external references.
-7. Annotations:
-   - Mandatory: @title, @description.
-   - Functional: @readonly, @mandatory, @assert.range, @assert.format.
-   - UI Prep: @Common.Text, @Common.ValueList.
-8. Semantics: Use @Semantics.amount.currencyCode: 'currency' and @Semantics.currencyCode: true.
+
+1. STRUCTURE:
+   - db/common.cds: Reusable types, enums and code-list entities
+   - db/schema.cds: Main entity definitions
+   - db/data/*.csv: Sample data per entity
+
+2. NAMESPACE & IMPORTS:
+   - Always declare `namespace {namespace};`
+   - Import: `using { cuid, managed, Currency, Country, Language } from '@sap/cds/common';`
+   - Import: `using { StatusValues, PriorityValues } from './common';`
+
+3. NAMING CONVENTIONS:
+   - Entities: PascalCase (e.g. PurchaseOrder, SalesOrderItem)
+   - Fields: camelCase (e.g. orderNumber, totalAmount, createdAt)
+   - Types: PascalCase (e.g. StatusCode, PriorityCode)
+
+4. STANDARD ASPECTS — use for EVERY primary entity:
+   - `cuid` — auto-generated UUID key
+   - `managed` — createdBy, createdAt, modifiedBy, modifiedAt
+
+5. CDS ENUMS — use for status/type/priority/category fields:
+   ```cds
+   type StatusCode : String enum {
+       New        = 'N';
+       InProcess  = 'I';
+       Completed  = 'C';
+       Cancelled  = 'X';
+   }
+   type PriorityCode : String enum {
+       High   = 'H';
+       Medium = 'M';
+       Low    = 'L';
+   }
+   ```
+
+6. FIELD ANNOTATIONS — MANDATORY on every field:
+   - `@title: 'Human Readable Label'` on EVERY field
+   - `@description: 'Detailed description'` on business-critical fields
+   - `@mandatory` on required fields (not nullable, not key)
+   - `@readonly` on computed/system fields
+   - `@assert.range` on numeric fields with defined bounds
+   - `@Semantics.amount.currencyCode: 'currency'` on money fields
+   - `@Semantics.currencyCode` on currency code fields
+   - `@Semantics.unitOfMeasure: 'unit'` on quantity fields
+   - `@Semantics.email.address` on email fields
+   - `@Semantics.telephone.type` on phone fields
+
+7. RELATIONSHIPS:
+   - `Composition of many` for owned sub-items (Order → Items)
+   - `Association to` for references (Order → Customer)
+   - Include `on` conditions for compositions: `items : Composition of many OrderItem on items.parent = $self;`
+   - Add back-reference in child: `parent : Association to Order;`
+
+8. LOCALIZATION:
+   - Use `localized String` for descriptions and long text fields
+   - Example: `description : localized String(1000);`
+
+9. SAMPLE DATA (CSV):
+   - Use semicolons as separators
+   - Generate 5-8 realistic rows with real-world data (names, emails, dates)
+   - Use {{{$guid}}} for UUID keys
 
 OUTPUT FORMAT:
 Return a JSON object:
 {
-  "schema_cds": "... CDS content ...",
-  "sample_data": [
-    {"filename": "db/data/namespace-Entity.csv", "content": "... CSV data (5-10 rows) ..."}
-  ]
+    "common_cds": "... db/common.cds with reusable types ...",
+    "schema_cds": "... db/schema.cds main schema ...",
+    "sample_data": [
+        {"filename": "db/data/namespace-Entity.csv", "content": "... CSV data ..."}
+    ]
 }
 Return ONLY the JSON."""
 
 
-SCHEMA_GENERATION_PROMPT = """Generate a complete db/schema.cds file and realistic sample CSV data for a high-quality SAP CAP project.
+SCHEMA_GENERATION_PROMPT = """Generate a complete, industry-grade CDS data model for this SAP CAP project.
 
-Project: {project_name} ({namespace})
+Project: {project_name}
+Namespace: {namespace}
 Description: {description}
 
-Entities: {entities_json}
-Relationships: {relationships_json}
-Rules: {business_rules_json}
+=== Entities ===
+{entities_json}
 
-Requirements:
-1. Namespace: {namespace}
-2. Include 'using { cuid, managed } from '@sap/cds/common';'
-3. Use enums for status/priority fields.
-4. Add @title and @description to EVERY field.
-5. Use '@changelog' or 'managed' aspects for audit trails.
-6. For associations, ensure the target entity exists in the model.
-7. Generate 5-10 rows of high-quality sample data per entity.
-8. Use semicolons for CSV separators.
+=== Relationships ===
+{relationships_json}
 
-The output must be a valid SAP CAP project structure for the 'db' layer."""
+=== Business Rules ===
+{business_rules_json}
+
+REQUIREMENTS:
+1. Create db/common.cds with:
+   - StatusCode enum (New, InProcess, Completed, Cancelled, etc.)
+   - PriorityCode enum (High, Medium, Low)
+   - Any domain-specific enums based on the entities
+
+2. Create db/schema.cds with:
+   - namespace {namespace}
+   - Import cuid, managed, Currency, Country, Language from @sap/cds/common
+   - Import custom types from ./common
+   - Every entity extends cuid, managed aspects
+   - Every field has @title annotation
+   - Status fields use StatusCode enum type
+   - Priority fields use PriorityCode enum type
+   - Money fields have @Semantics.amount.currencyCode
+   - Email fields have @Semantics.email.address
+   - Phone fields have @Semantics.telephone.type
+   - Text fields use `localized String` where appropriate
+   - Compositions use `on child.parent = $self` pattern
+   - Include criticality virtual field for status coloring
+
+3. Generate sample CSV data with:
+   - 5-8 rows per entity
+   - Realistic values (real names, real emails, proper dates)
+   - Semicolons as separators
+   - UUID values as {{$guid}}
+
+Respond with ONLY valid JSON."""
 
 
 # =============================================================================
@@ -115,208 +190,394 @@ CDS_TYPE_MAP = {
 
 
 # =============================================================================
+# Realistic sample data generators
+# =============================================================================
+
+FIRST_NAMES = ["James", "Sarah", "Michael", "Emma", "Robert", "Lisa", "David", "Anna"]
+LAST_NAMES = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Miller", "Davis", "Wilson"]
+COMPANIES = ["Acme Corp", "TechVision GmbH", "Global Trade Inc", "SmartSolutions AG", "NovaTech Ltd", "Pinnacle Systems", "CoreDynamics", "Atlas Industries"]
+CITIES = ["New York", "Berlin", "London", "Tokyo", "Mumbai", "Sydney", "Toronto", "Singapore"]
+COUNTRIES = ["US", "DE", "GB", "JP", "IN", "AU", "CA", "SG"]
+STATUSES = ["New", "InProcess", "Completed", "Cancelled"]
+PRIORITIES = ["High", "Medium", "Low"]
+CURRENCIES = ["USD", "EUR", "GBP", "JPY"]
+
+
+def _gen_value(field: dict, row_idx: int, entity_name: str) -> str:
+    """Generate a realistic sample value for a field."""
+    name = field.get("name", "").lower()
+    ftype = field.get("type", "String")
+
+    # UUID keys
+    if field.get("key") and ftype == "UUID":
+        return str(uuid.uuid4())
+    if ftype == "UUID":
+        return str(uuid.uuid4())
+
+    # Contextual string values
+    if "email" in name:
+        return f"{FIRST_NAMES[row_idx % len(FIRST_NAMES)].lower()}.{LAST_NAMES[row_idx % len(LAST_NAMES)].lower()}@example.com"
+    if "phone" in name or "mobile" in name or "telephone" in name:
+        return f"+1-555-{100 + row_idx:03d}-{1000 + row_idx * 111:04d}"
+    if name in ("firstname", "first_name", "givenname"):
+        return FIRST_NAMES[row_idx % len(FIRST_NAMES)]
+    if name in ("lastname", "last_name", "surname", "familyname"):
+        return LAST_NAMES[row_idx % len(LAST_NAMES)]
+    if name == "name" or "name" in name and "company" not in name and "project" not in name:
+        if "customer" in entity_name.lower() or "employee" in entity_name.lower() or "person" in entity_name.lower():
+            return f"{FIRST_NAMES[row_idx % len(FIRST_NAMES)]} {LAST_NAMES[row_idx % len(LAST_NAMES)]}"
+        return f"{entity_name} {row_idx + 1}"
+    if "company" in name or "organization" in name or "supplier" in name:
+        return COMPANIES[row_idx % len(COMPANIES)]
+    if "city" in name:
+        return CITIES[row_idx % len(CITIES)]
+    if "country" in name:
+        return COUNTRIES[row_idx % len(COUNTRIES)]
+    if "currency" in name:
+        return CURRENCIES[row_idx % len(CURRENCIES)]
+    if "status" in name or "state" in name:
+        return STATUSES[row_idx % len(STATUSES)]
+    if "priority" in name:
+        return PRIORITIES[row_idx % len(PRIORITIES)]
+    if "description" in name or "comment" in name or "note" in name:
+        return f"Sample {name} for {entity_name} record {row_idx + 1}"
+    if "address" in name:
+        return f"{100 + row_idx * 11} Main Street, {CITIES[row_idx % len(CITIES)]}"
+    if "url" in name or "website" in name:
+        return f"https://example.com/{entity_name.lower()}/{row_idx + 1}"
+    if "number" in name or "no" == name or "code" in name or "ref" in name:
+        prefix = entity_name[:3].upper()
+        return f"{prefix}-2024-{(row_idx + 1):05d}"
+
+    # Type-based fallback
+    if ftype in ("String", "LargeString"):
+        return f"{entity_name} {name.replace('_', ' ').title()} {row_idx + 1}"
+    if ftype in ("Integer", "Int16", "Int32", "Int64"):
+        if "quantity" in name or "count" in name or "qty" in name:
+            return str(random.randint(1, 100))
+        if "age" in name:
+            return str(25 + row_idx * 5)
+        return str((row_idx + 1) * 10)
+    if ftype in ("Decimal", "Double"):
+        if "price" in name or "amount" in name or "cost" in name or "total" in name:
+            return f"{random.uniform(10, 5000):.2f}"
+        if "rate" in name or "percentage" in name or "discount" in name:
+            return f"{random.uniform(0, 25):.2f}"
+        return f"{(row_idx + 1) * 99.99:.2f}"
+    if ftype == "Boolean":
+        return "true" if row_idx % 3 != 0 else "false"
+    if ftype == "Date":
+        base = datetime(2024, 1, 15)
+        d = base + timedelta(days=row_idx * 30)
+        return d.strftime("%Y-%m-%d")
+    if ftype == "DateTime":
+        base = datetime(2024, 1, 15, 9, 0, 0)
+        d = base + timedelta(days=row_idx * 15, hours=row_idx * 2)
+        return d.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return f"Value{row_idx + 1}"
+
+
+# =============================================================================
 # Template Functions
 # =============================================================================
 
+def generate_common_cds(state: BuilderState) -> str:
+    """Generate db/common.cds with reusable types and enums."""
+    namespace = state.get("project_namespace", "com.company.app")
+    entities = state.get("entities", [])
+
+    lines = []
+    lines.append(f"namespace {namespace};")
+    lines.append("")
+    lines.append("// ═══════════════════════════════════════════════════════════")
+    lines.append("// Reusable Types & Enums")
+    lines.append("// ═══════════════════════════════════════════════════════════")
+    lines.append("")
+
+    # Detect which enums we need
+    has_status = any(
+        any(f.get("name", "").lower() in ("status", "state", "lifecycle") for f in e.get("fields", []))
+        for e in entities
+    )
+    has_priority = any(
+        any(f.get("name", "").lower() in ("priority", "urgency", "importance") for f in e.get("fields", []))
+        for e in entities
+    )
+    has_category = any(
+        any(f.get("name", "").lower() in ("category", "type", "kind", "classification") for f in e.get("fields", []))
+        for e in entities
+    )
+
+    if has_status:
+        lines.append("/**")
+        lines.append(" * Standard status codes for workflow-driven entities")
+        lines.append(" */")
+        lines.append("type StatusCode : String(1) enum {")
+        lines.append("    New        = 'N';")
+        lines.append("    InProcess  = 'I';")
+        lines.append("    Completed  = 'C';")
+        lines.append("    Cancelled  = 'X';")
+        lines.append("    Approved   = 'A';")
+        lines.append("    Rejected   = 'R';")
+        lines.append("    OnHold     = 'H';")
+        lines.append("    Draft      = 'D';")
+        lines.append("}")
+        lines.append("")
+
+    if has_priority:
+        lines.append("/**")
+        lines.append(" * Priority codes for work items")
+        lines.append(" */")
+        lines.append("type PriorityCode : String(1) enum {")
+        lines.append("    High   = 'H';")
+        lines.append("    Medium = 'M';")
+        lines.append("    Low    = 'L';")
+        lines.append("}")
+        lines.append("")
+
+    if has_category:
+        lines.append("/**")
+        lines.append(" * Generic category type")
+        lines.append(" */")
+        lines.append("type CategoryCode : String(20);")
+        lines.append("")
+
+    # Common reusable types
+    lines.append("/**")
+    lines.append(" * Common reusable field types")
+    lines.append(" */")
+    lines.append("type EmailAddress : String(255);")
+    lines.append("type PhoneNumber  : String(30);")
+    lines.append("type URL          : String(2048);")
+    lines.append("type Amount       : Decimal(15, 2);")
+    lines.append("type Quantity     : Integer;")
+    lines.append("type Percentage   : Decimal(5, 2);")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
 def generate_field_definition(field: dict[str, Any]) -> str:
-    """Generate CDS field definition from field dict."""
+    """Generate CDS field definition from field dict with rich annotations."""
     name = field.get("name", "")
     field_type = field.get("type", "String")
-    
+    name_lower = name.lower()
+
     # Map to CDS type
     cds_type = CDS_TYPE_MAP.get(field_type, "String")
-    
+
     # Add length/precision
     if field_type == "String" and field.get("length"):
         cds_type = f"String({field['length']})"
     elif field_type == "Decimal":
-        precision = field.get("precision", 10)
+        precision = field.get("precision", 15)
         scale = field.get("scale", 2)
         cds_type = f"Decimal({precision}, {scale})"
-    
-    # Build annotations
+
+    # Build annotations list
     annotations = []
-    if field.get("key"):
-        annotations.append("key")
-    
-    # Add other annotations
-    field_annotations = field.get("annotations", {})
-    if field_annotations.get("title"):
-        annotations.append(f"@title: '{field_annotations['title']}'")
-    if field_annotations.get("description"):
-        annotations.append(f"@description: '{field_annotations['description']}'")
-    if field_annotations.get("readonly"):
-        annotations.append("@readonly")
-    if field_annotations.get("mandatory"):
-        annotations.append("@mandatory")
-    
-    # Add domain-specific annotations
-    if name.lower() in ["price", "amount", "total", "netamount", "taxamount"]:
-        annotations.append("@Semantics.amount.currencyCode: 'currency'")
-    if name.lower() == "currency":
-        annotations.append("@Semantics.currencyCode: true")
-    
-    # Build field line
-    parts = []
-    if "key" in annotations:
-        parts.append("key")
-        annotations.remove("key")
-    
-    parts.append(name)
-    parts.append(":")
-    parts.append(cds_type)
-    
-    # Add nullability
+
+    # @title — generate human-readable label from camelCase name
+    field_annots = field.get("annotations", {})
+    title = field_annots.get("title")
+    if not title:
+        # Convert camelCase to Title Case
+        words = re.findall(r'[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)', name)
+        title = " ".join(w.capitalize() for w in words) if words else name
+    annotations.append(f"@title: '{title}'")
+
+    # @description
+    if field_annots.get("description"):
+        annotations.append(f"@description: '{field_annots['description']}'")
+
+    # @mandatory
     if not field.get("nullable", True) and not field.get("key"):
-        parts.append("not null")
-    
-    # Add default
+        annotations.append("@mandatory")
+
+    # @readonly
+    if field_annots.get("readonly") or name_lower in ("createdat", "createdby", "modifiedat", "modifiedby"):
+        annotations.append("@readonly")
+
+    # Semantic annotations
+    if name_lower in ("price", "amount", "total", "netamount", "totalamount", "taxamount", "grossamount", "cost", "unitprice"):
+        annotations.append("@Semantics.amount.currencyCode: 'currency'")
+    if name_lower == "currency" or name_lower == "currencycode":
+        annotations.append("@Semantics.currencyCode")
+    if name_lower in ("email", "emailaddress", "mail"):
+        annotations.append("@Semantics.email.address")
+    if name_lower in ("phone", "phonenumber", "telephone", "mobile"):
+        annotations.append("@Semantics.telephone.type: #work")
+    if name_lower in ("quantity", "qty", "count"):
+        annotations.append("@Semantics.quantity.unitOfMeasure: 'unit'")
+
+    # @assert.range for certain numeric fields
+    if field_type in ("Decimal", "Double", "Integer") and any(k in name_lower for k in ("rating", "score", "percentage", "discount")):
+        if "rating" in name_lower or "score" in name_lower:
+            annotations.append("@assert.range: [0, 5]")
+        elif "percentage" in name_lower or "discount" in name_lower:
+            annotations.append("@assert.range: [0, 100]")
+
+    # Build the field lines
+    key_prefix = "key " if field.get("key") else "    "
+    type_suffix = ""
+    if not field.get("nullable", True) and not field.get("key"):
+        type_suffix = " not null"
     if field.get("default"):
-        parts.append(f"default {field['default']}")
-    
-    # Build annotation prefix
-    annotation_str = " ".join(annotations)
-    if annotation_str:
-        return f"    {annotation_str}\n    {' '.join(parts)};"
-    
-    return f"    {' '.join(parts)};"
+        type_suffix += f" default {field['default']}"
+
+    # Format: annotations on line above, field definition below
+    annotation_lines = "\n".join(f"    {a}" for a in annotations)
+    field_line = f"    {key_prefix.strip()} {name} : {cds_type}{type_suffix};" if field.get("key") else f"    {name} : {cds_type}{type_suffix};"
+
+    if annotations:
+        return f"{annotation_lines}\n{field_line}"
+    return field_line
 
 
 def generate_entity_cds(entity: EntityDefinition, relationships: list[RelationshipDefinition]) -> str:
-    """Generate CDS entity definition."""
+    """Generate CDS entity definition with relationships."""
     name = entity.get("name", "Entity")
     description = entity.get("description", "")
     fields = entity.get("fields", [])
     aspects = entity.get("aspects", [])
-    
+
     lines = []
-    
-    # Entity description
+
+    # Entity JSDoc
     if description:
         lines.append(f"/**")
         lines.append(f" * {description}")
         lines.append(f" */")
-    
+
     # Entity declaration with aspects
     if aspects:
         aspect_str = ", ".join(aspects)
         lines.append(f"entity {name} : {aspect_str} {{")
     else:
         lines.append(f"entity {name} {{")
-    
+
     # Fields
     for field in fields:
+        # Skip key fields if entity uses cuid (cuid provides ID already)
+        if field.get("key") and field.get("type") == "UUID" and "cuid" in aspects:
+            continue
         lines.append(generate_field_definition(field))
-    
-    # Add associations and compositions
-    entity_relationships = [r for r in relationships if r.get("source_entity") == name]
-    for rel in entity_relationships:
+
+    # Criticality virtual field for status entities
+    has_status = any(f.get("name", "").lower() in ("status", "state") for f in fields)
+    if has_status:
+        lines.append("    // Virtual field for Fiori status coloring")
+        lines.append("    @title: 'Criticality'")
+        lines.append("    criticality : Integer @Core.Computed;")
+
+    # Add compositions and associations from relationships
+    entity_rels = [r for r in relationships if r.get("source_entity") == name]
+    if entity_rels:
+        lines.append("")
+        lines.append("    // Relationships")
+
+    for rel in entity_rels:
         rel_name = rel.get("name", "")
         target = rel.get("target_entity", "")
         rel_type = rel.get("type", "association")
         cardinality = rel.get("cardinality", "n:1")
-        
+
         if rel_type == "composition":
-            if cardinality in ["1:n", "n:m"]:
-                lines.append(f"    {rel_name} : Composition of many {target};")
+            if cardinality in ("1:n", "n:m"):
+                lines.append(f"    {rel_name} : Composition of many {target} on {rel_name}.parent = $self;")
             else:
                 lines.append(f"    {rel_name} : Composition of {target};")
         else:  # association
-            if cardinality in ["1:n", "n:m"]:
+            if cardinality in ("1:n", "n:m"):
                 lines.append(f"    {rel_name} : Association to many {target};")
             else:
                 lines.append(f"    {rel_name} : Association to {target};")
-    
+
+    # Back-references for composition children
+    child_rels = [r for r in relationships if r.get("target_entity") == name and r.get("type") == "composition"]
+    for rel in child_rels:
+        parent = rel.get("source_entity", "")
+        lines.append(f"    parent : Association to {parent};")
+
     lines.append("}")
-    
+
     return "\n".join(lines)
 
 
-def generate_schema_cds(
-    state: BuilderState,
-) -> str:
+def generate_schema_cds(state: BuilderState) -> str:
     """Generate the main db/schema.cds file."""
     namespace = state.get("project_namespace", "com.company.app")
     entities = state.get("entities", [])
     relationships = state.get("relationships", [])
-    
+
     lines = []
-    
-    # Namespace
     lines.append(f"namespace {namespace};")
     lines.append("")
-    
-    # Common imports based on aspects used
+
+    # Common imports based on aspects and field types used
     all_aspects = set()
+    has_currency = False
+    has_country = False
     for entity in entities:
         all_aspects.update(entity.get("aspects", []))
-    
-    if all_aspects:
-        using_aspects = []
-        if "cuid" in all_aspects:
-            using_aspects.append("cuid")
-        if "managed" in all_aspects:
-            using_aspects.append("managed")
-        if "temporal" in all_aspects:
-            using_aspects.append("temporal")
-        
-        if using_aspects:
-            lines.append(f"using {{ {', '.join(using_aspects)} }} from '@sap/cds/common';")
-            lines.append("")
-    
+        for field in entity.get("fields", []):
+            fn = field.get("name", "").lower()
+            if "currency" in fn:
+                has_currency = True
+            if "country" in fn:
+                has_country = True
+
+    using_items = []
+    if "cuid" in all_aspects:
+        using_items.append("cuid")
+    if "managed" in all_aspects:
+        using_items.append("managed")
+    if "temporal" in all_aspects:
+        using_items.append("temporal")
+    if has_currency:
+        using_items.append("Currency")
+    if has_country:
+        using_items.append("Country")
+
+    if using_items:
+        lines.append(f"using {{ {', '.join(using_items)} }} from '@sap/cds/common';")
+
+    # Import common types
+    lines.append("using from './common';")
+    lines.append("")
+
+    lines.append("// ═══════════════════════════════════════════════════════════")
+    lines.append("// Entity Definitions")
+    lines.append("// ═══════════════════════════════════════════════════════════")
+    lines.append("")
+
     # Generate each entity
     for entity in entities:
         lines.append(generate_entity_cds(entity, relationships))
         lines.append("")
-    
+
     return "\n".join(lines)
 
 
-def generate_sample_data_csv(entity: EntityDefinition) -> tuple[str, str]:
-    """Generate sample CSV data for an entity."""
+def generate_sample_data_csv(entity: EntityDefinition, namespace: str) -> tuple[str, str]:
+    """Generate realistic sample CSV data for an entity."""
     name = entity.get("name", "Entity")
     fields = entity.get("fields", [])
-    
-    # CSV header
-    header_fields = [f["name"] for f in fields if not f.get("name", "").lower().startswith("_")]
-    header = ";".join(header_fields)
-    
-    # Generate sample rows
+
+    # Filter out system fields
+    visible_fields = [f for f in fields if not f.get("name", "").startswith("_")]
+    header_names = [f["name"] for f in visible_fields]
+    header = ";".join(header_names)
+
     rows = []
-    for i in range(5):
-        row_values = []
-        for field in fields:
-            field_name = field.get("name", "")
-            field_type = field.get("type", "String")
-            
-            if field_name.lower().startswith("_"):
-                continue  # Skip system fields
-            
-            if field.get("key") and field_type == "UUID":
-                row_values.append(f"{{{{$guid}}}}")
-            elif field_type in ["String", "LargeString"]:
-                row_values.append(f"Sample {field_name} {i + 1}")
-            elif field_type in ["Integer", "Int16", "Int32", "Int64"]:
-                row_values.append(str((i + 1) * 10))
-            elif field_type in ["Decimal", "Double"]:
-                row_values.append(f"{(i + 1) * 10.99}")
-            elif field_type == "Boolean":
-                row_values.append("true" if i % 2 == 0 else "false")
-            elif field_type == "Date":
-                row_values.append(f"2024-0{i + 1}-15")
-            elif field_type == "DateTime":
-                row_values.append(f"2024-0{i + 1}-15T10:30:00Z")
-            elif field_type == "UUID":
-                row_values.append(f"{{{{$guid}}}}")
-            else:
-                row_values.append(f"Value{i + 1}")
-        
-        rows.append(";".join(row_values))
-    
+    for i in range(6):  # 6 rows of realistic data
+        values = [_gen_value(f, i, name) for f in visible_fields]
+        rows.append(";".join(values))
+
     csv_content = header + "\n" + "\n".join(rows)
-    # Note: namespace_to_path used below should be defined or replaced.
-    # In data_modeling_agent it uses namespace.replace('.', '-')
-    return csv_content
+    filename = f"db/data/{namespace.replace('.', '-')}-{name}.csv"
+
+    return filename, csv_content
 
 
 def namespace_to_path(name: str) -> str:
@@ -325,8 +586,9 @@ def namespace_to_path(name: str) -> str:
 
 
 def generate_index_cds(entities: list[EntityDefinition]) -> str:
-    """Generate db/index.cds that imports schema."""
+    """Generate db/index.cds that imports schema and common types."""
     return """// Database Model Index
+using from './common';
 using from './schema';
 """
 
@@ -339,7 +601,6 @@ def _parse_llm_response(response_text: str) -> dict | None:
     """Parse LLM JSON response, handling markdown code fences."""
     try:
         text = response_text.strip()
-        # Strip markdown code fences
         if text.startswith("```json"):
             text = text[7:]
         if text.startswith("```"):
@@ -348,7 +609,6 @@ def _parse_llm_response(response_text: str) -> dict | None:
             text = text[:-3]
         return json.loads(text.strip())
     except json.JSONDecodeError:
-        # Try to find JSON object in the response
         match = re.search(r'\{[\s\S]*\}', text)
         if match:
             try:
@@ -370,9 +630,10 @@ async def data_modeling_agent(state: BuilderState) -> BuilderState:
     Falls back to template-based generation if LLM fails.
     
     Generates:
-    1. db/schema.cds - Main entity definitions
-    2. db/index.cds - Import file
-    3. db/data/*.csv - Sample data files
+    1. db/common.cds - Reusable types, enums, code-list entities
+    2. db/schema.cds - Main entity definitions with rich annotations
+    3. db/index.cds - Import file
+    4. db/data/*.csv - Realistic sample data files
     
     Returns updated state with generated CDS files.
     """
@@ -410,7 +671,7 @@ async def data_modeling_agent(state: BuilderState) -> BuilderState:
     business_rules = state.get("business_rules", [])
     provider = state.get("llm_provider")
     
-    log_progress(state, f"Processing {len(entities)} entities for CDS schema generation via LLM...")
+    log_progress(state, f"Processing {len(entities)} entities for CDS schema generation...")
     
     llm_success = False
     
@@ -445,12 +706,21 @@ async def data_modeling_agent(state: BuilderState) -> BuilderState:
             
             # Basic validation: must contain namespace and entity keyword
             if "namespace" in schema_content and "entity" in schema_content.lower():
+                # Add common.cds if provided
+                if parsed.get("common_cds"):
+                    generated_files.append({
+                        "path": "db/common.cds",
+                        "content": parsed["common_cds"],
+                        "file_type": "cds",
+                    })
+                    log_progress(state, "✅ LLM-generated common.cds accepted.")
+                
                 generated_files.append({
                     "path": "db/schema.cds",
                     "content": schema_content,
                     "file_type": "cds",
                 })
-                log_progress(state, "LLM-generated CDS schema accepted.")
+                log_progress(state, "✅ LLM-generated CDS schema accepted.")
                 
                 # Process LLM-generated sample data
                 sample_data = parsed.get("sample_data", [])
@@ -463,7 +733,7 @@ async def data_modeling_agent(state: BuilderState) -> BuilderState:
                         })
                 
                 if sample_data:
-                    log_progress(state, f"LLM generated {len(sample_data)} sample data files.")
+                    log_progress(state, f"✅ LLM generated {len(sample_data)} sample data files.")
                 
                 llm_success = True
             else:
@@ -476,11 +746,24 @@ async def data_modeling_agent(state: BuilderState) -> BuilderState:
         log_progress(state, f"LLM call failed ({str(e)[:80]}). Falling back to template generation.")
     
     # ==========================================================================
-    # Fallback: Template-based generation
+    # Fallback: Template-based generation (industry-grade)
     # ==========================================================================
     if not llm_success:
+        # 1. Generate db/common.cds
         try:
-            log_progress(state, "Generating db/schema.cds via template fallback...")
+            log_progress(state, "Generating db/common.cds with reusable types...")
+            common_content = generate_common_cds(state)
+            generated_files.append({
+                "path": "db/common.cds",
+                "content": common_content,
+                "file_type": "cds",
+            })
+        except Exception as e:
+            logger.error(f"Failed to generate common.cds: {e}")
+        
+        # 2. Generate db/schema.cds
+        try:
+            log_progress(state, "Generating db/schema.cds with rich annotations...")
             schema_content = generate_schema_cds(state)
             generated_files.append({
                 "path": "db/schema.cds",
@@ -499,50 +782,12 @@ async def data_modeling_agent(state: BuilderState) -> BuilderState:
                 "severity": "error",
             })
         
-        # Generate sample data via template fallback
+        # 3. Generate realistic sample data CSVs
         if state.get("generate_sample_data", True):
-            log_progress(state, "Generating sample data CSVs via template fallback...")
+            log_progress(state, "Generating realistic sample data CSVs...")
             for entity in entities:
                 try:
-                    entity_name = entity.get("name", "Entity")
-                    fields = entity.get("fields", [])
-                    
-                    header_fields = [f["name"] for f in fields]
-                    header = ";".join(header_fields)
-                    
-                    rows = []
-                    for i in range(3):
-                        row_values = []
-                        for field in fields:
-                            field_name = field.get("name", "")
-                            field_type = field.get("type", "String")
-                            
-                            if field.get("key") and field_type == "UUID":
-                                import uuid
-                                row_values.append(str(uuid.uuid4()))
-                            elif field_type in ["String", "LargeString"]:
-                                row_values.append(f"Sample {field_name} {i + 1}")
-                            elif field_type in ["Integer", "Int16", "Int32", "Int64"]:
-                                row_values.append(str((i + 1) * 10))
-                            elif field_type in ["Decimal", "Double"]:
-                                row_values.append(f"{(i + 1) * 100.99}")
-                            elif field_type == "Boolean":
-                                row_values.append("true" if i % 2 == 0 else "false")
-                            elif field_type == "Date":
-                                row_values.append(f"2024-0{i + 1}-15")
-                            elif field_type == "DateTime":
-                                row_values.append(f"2024-0{i + 1}-15T10:30:00Z")
-                            elif field_type == "UUID":
-                                import uuid
-                                row_values.append(str(uuid.uuid4()))
-                            else:
-                                row_values.append(f"Value{i + 1}")
-                        
-                        rows.append(";".join(row_values))
-                    
-                    csv_content = header + "\n" + "\n".join(rows)
-                    filename = f"db/data/{namespace.replace('.', '-')}-{entity_name}.csv"
-                    
+                    filename, csv_content = generate_sample_data_csv(entity, namespace)
                     generated_files.append({
                         "path": filename,
                         "content": csv_content,
@@ -570,30 +815,22 @@ async def data_modeling_agent(state: BuilderState) -> BuilderState:
     from backend.agents.validator import validate_artifact
     from backend.agents.correction import generate_correction_prompt, should_retry_agent, format_correction_summary
     
-    # Get retry configuration
-    max_retries = 3  # Could be from config
+    max_retries = 3
     retry_count = state.get("retry_counts", {}).get("data_modeling", 0)
     
-    # Validate the generated schema.cds only
     schema_artifact = next((f for f in generated_files if f["path"] == "db/schema.cds"), None)
-    if schema_artifact and llm_success:  # Only validate LLM-generated content
+    if schema_artifact and llm_success:
         validation_results = validate_artifact(schema_artifact["path"], schema_artifact["content"])
         
         if any(result.has_errors for result in validation_results):
-            # Validation failed
             if should_retry_agent(validation_results, retry_count, max_retries):
-                # Need to retry
                 log_progress(state, f"Validation found errors. Attempting correction (retry {retry_count + 1}/{max_retries})...")
                 
-                # Update retry count
                 if "retry_counts" not in state:
                     state["retry_counts"] = {}
                 state["retry_counts"]["data_modeling"] = retry_count + 1
-                
-                # Mark state for retry
                 state["needs_correction"] = True
                 
-                # Record correction attempt
                 if "correction_history" not in state:
                     state["correction_history"] = []
                 state["correction_history"].append({
@@ -603,22 +840,16 @@ async def data_modeling_agent(state: BuilderState) -> BuilderState:
                     "timestamp": datetime.utcnow().isoformat()
                 })
                 
-                # Log the specific errors
                 for result in validation_results:
                     for issue in result.issues:
                         if issue.severity.value == "error":
                             log_progress(state, f"  - {issue.message}")
                 
-                # Prepare for re-run by keeping the state but clearing generated_files
-                # The workflow will loop back and re-run this agent
-                state["artifacts_db"] = []  # Clear for retry
-                
-                # Return early - workflow will loop back
+                state["artifacts_db"] = []
                 log_progress(state, "Preparing to retry with corrections...")
                 return state
             else:
-                # Max retries reached - log and continue with what we have
-                log_progress(state, f"⚠️ Max retries reached. Some validation errors remain.")
+                log_progress(state, "⚠️ Max retries reached. Some validation errors remain.")
                 for result in validation_results:
                     for issue in result.issues:
                         if issue.severity.value == "error":
@@ -627,12 +858,10 @@ async def data_modeling_agent(state: BuilderState) -> BuilderState:
                                 "code": issue.code or "VALIDATION_ERROR",
                                 "message": issue.message,
                                 "field": None,
-                                "severity": "warning"  # Downgrade to warning since we tried
+                                "severity": "warning"
                             })
         else:
-            # Validation passed
             if retry_count > 0:
-                # We auto-fixed errors!
                 log_progress(state, f"✅ Validation passed after {retry_count} correction(s)")
                 summary = format_correction_summary("data_modeling", retry_count, retry_count, retry_count)
                 if "auto_fixed_errors" not in state:
@@ -645,7 +874,6 @@ async def data_modeling_agent(state: BuilderState) -> BuilderState:
             else:
                 log_progress(state, "✅ Validation passed on first attempt")
     
-    # Clear retry flag
     state["needs_correction"] = False
     
     # ==========================================================================
@@ -654,7 +882,6 @@ async def data_modeling_agent(state: BuilderState) -> BuilderState:
     state["artifacts_db"] = generated_files
     state["validation_errors"] = state.get("validation_errors", []) + errors
     
-    # Record execution
     state["agent_history"] = state.get("agent_history", []) + [{
         "agent_name": "data_modeling",
         "status": "completed" if not any(e["severity"] == "error" for e in errors) else "failed",
@@ -667,7 +894,7 @@ async def data_modeling_agent(state: BuilderState) -> BuilderState:
     }]
     
     generation_method = "LLM" if llm_success else "template fallback"
-    log_progress(state, f"Data modeling phase complete ({generation_method}). Generated {len(generated_files)} files.")
+    log_progress(state, f"Data modeling complete ({generation_method}). Generated {len(generated_files)} files.")
     logger.info(f"Data Modeling Agent completed via {generation_method}. Generated {len(generated_files)} files.")
     
     return state

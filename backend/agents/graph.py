@@ -132,18 +132,6 @@ def create_builder_graph() -> StateGraph:
         }
     )
     
-    # Linear flow for now (can be parallelized later)
-    graph.add_edge("service_exposure", "business_logic")
-    # 4. Business Logic (with retry loop)
-    graph.add_conditional_edges(
-        "business_logic",
-        should_retry_agent,
-        {
-            "retry": "business_logic",
-            "continue": "fiori_ui",
-        }
-    )
-    
     # 5. Fiori UI (with retry loop)
     graph.add_conditional_edges(
         "fiori_ui",

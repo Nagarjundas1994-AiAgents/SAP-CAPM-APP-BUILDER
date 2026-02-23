@@ -352,7 +352,39 @@ async def validation_agent(state: BuilderState) -> BuilderState:
             all_errors.extend(rule_errors)
         except Exception as e:
             logger.warning(f"Validation error for {artifact.get('path')}: {e}")
-    
+
+    # ==========================================================================
+    # Cross-file consistency check
+    # ==========================================================================
+    try:
+        from backend.agents.validator import validate_cross_file_consistency as _cross_check
+        cross_result = _cross_check(state)
+        if cross_result.issues:
+            log_progress(state, f"Cross-file consistency: {len(cross_result.issues)} issue(s) found.")
+            for issue in cross_result.issues:
+                all_errors.append({
+                    "agent": "validation",
+                    "code": issue.code or "CONSISTENCY",
+                    "message": issue.message,
+                    "field": None,
+                    "severity": issue.severity.value,
+                })
+    except Exception as e:
+        logger.warning(f"Cross-file consistency check failed: {e}")
+
+    # ==========================================================================
+    # Quality scoring
+    # ==========================================================================
+    try:
+        from backend.agents.validator import compute_quality_score as _quality_score
+        quality = _quality_score(state)
+        state["quality_score"] = quality
+        log_progress(state, f"Quality Score: {quality['total']}/100")
+        for detail in quality.get("details", []):
+            log_progress(state, f"  {detail}")
+    except Exception as e:
+        logger.warning(f"Quality scoring failed: {e}")
+
     # ==========================================================================
     # Generate compliance report
     # ==========================================================================
@@ -362,17 +394,17 @@ async def validation_agent(state: BuilderState) -> BuilderState:
         "content": report,
         "file_type": "md",
     })
-    
+
     # ==========================================================================
     # Update state
     # ==========================================================================
     error_count = sum(1 for e in all_errors if e.get("severity") == "error")
     warning_count = sum(1 for e in all_errors if e.get("severity") == "warning")
-    
+
     state["artifacts_docs"] = state.get("artifacts_docs", []) + generated_files
     state["validation_errors"] = state.get("validation_errors", []) + all_errors
     state["generation_status"] = GenerationStatus.COMPLETED.value if error_count == 0 else GenerationStatus.FAILED.value
-    
+
     state["agent_history"] = state.get("agent_history", []) + [{
         "agent_name": "validation",
         "status": "completed",
@@ -382,9 +414,9 @@ async def validation_agent(state: BuilderState) -> BuilderState:
         "error": None,
         "logs": state.get("current_logs", []),
     }]
-    
+
     generation_method = "LLM + rules" if llm_success else "rule-based"
     log_progress(state, f"Validation complete ({generation_method}). Errors: {error_count}, Warnings: {warning_count}")
     logger.info(f"Validation Agent completed via {generation_method}. {error_count} errors, {warning_count} warnings.")
-    
+
     return state

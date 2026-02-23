@@ -145,12 +145,13 @@ def _parse_llm_response(response_text: str) -> dict | None:
 # =============================================================================
 
 def generate_mta_yaml(state: BuilderState) -> str:
+    """Generate complete mta.yaml with srv, db, HTML5, destination, and all resources."""
     project_name = state.get("project_name", "App")
     mta_id = project_name.lower().replace(" ", "-").replace("_", "-")
     db_type = state.get("database_type", DatabaseType.SQLITE.value)
-    
-    hana_service = "hana" if db_type == DatabaseType.HANA.value else "sqlite"
-    
+    fiori_main_entity = state.get("fiori_main_entity", "entity")
+    app_name = fiori_main_entity.lower() if fiori_main_entity else "app"
+
     mta = f"""_schema-version: '3.3.0'
 ID: {mta_id}
 version: 1.0.0
@@ -167,6 +168,7 @@ build-parameters:
         - npx cds build --production
 
 modules:
+  # ── Server Module ──────────────────────────────────
   - name: {mta_id}-srv
     type: nodejs
     path: gen/srv
@@ -184,6 +186,7 @@ modules:
       - name: {mta_id}-auth
       - name: {mta_id}-db
 
+  # ── Database Deployer ──────────────────────────────
   - name: {mta_id}-db-deployer
     type: hdb
     path: gen/db
@@ -193,7 +196,70 @@ modules:
     requires:
       - name: {mta_id}-db
 
+  # ── HTML5 App Deployer ─────────────────────────────
+  - name: {mta_id}-app-deployer
+    type: com.sap.application.content
+    path: .
+    requires:
+      - name: {mta_id}-html5-repo-host
+        parameters:
+          content-target: true
+    build-parameters:
+      build-result: resources
+      requires:
+        - name: {mta_id}-{app_name}
+          artifacts:
+            - {app_name}.zip
+          target-path: resources/
+
+  # ── Fiori App Module ───────────────────────────────
+  - name: {mta_id}-{app_name}
+    type: html5
+    path: app/{app_name}
+    build-parameters:
+      build-result: dist
+      builder: custom
+      commands:
+        - npm ci
+        - npm run build
+      supported-platforms: []
+
+  # ── Destination Content ────────────────────────────
+  - name: {mta_id}-destination-content
+    type: com.sap.application.content
+    requires:
+      - name: {mta_id}-destination-service
+        parameters:
+          content-target: true
+      - name: {mta_id}-html5-repo-host
+        parameters:
+          service-key:
+            name: {mta_id}-html5-repo-host-key
+      - name: srv-api
+      - name: {mta_id}-auth
+        parameters:
+          service-key:
+            name: {mta_id}-auth-key
+    parameters:
+      content:
+        instance:
+          destinations:
+            - Name: {mta_id}-html5-repo-host
+              ServiceInstanceName: {mta_id}-html5-repo-host
+              ServiceKeyName: {mta_id}-html5-repo-host-key
+              sap.cloud.service: {mta_id}
+            - Name: {mta_id}-srv-api
+              Authentication: OAuth2UserTokenExchange
+              URL: ~{{srv-api/srv-url}}
+              TokenServiceInstanceName: {mta_id}-auth
+              TokenServiceKeyName: {mta_id}-auth-key
+              sap.cloud.service: {mta_id}
+          existing_destinations_policy: update
+    build-parameters:
+      no-source: true
+
 resources:
+  # ── XSUAA ──────────────────────────────────────────
   - name: {mta_id}-auth
     type: org.cloudfoundry.managed-service
     parameters:
@@ -201,13 +267,227 @@ resources:
       service-plan: application
       path: ./xs-security.json
 
+  # ── HDI Container ──────────────────────────────────
   - name: {mta_id}-db
     type: com.sap.xs.hdi-container
     parameters:
-      service: {hana_service}
+      service: hana
       service-plan: hdi-shared
+
+  # ── Destination Service ────────────────────────────
+  - name: {mta_id}-destination-service
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: destination
+      service-plan: lite
+
+  # ── HTML5 Apps Repo ────────────────────────────────
+  - name: {mta_id}-html5-repo-host
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: html5-apps-repo
+      service-plan: app-host
 """
     return mta
+
+
+def generate_package_json(state: BuilderState) -> str:
+    """Generate production-ready package.json with SAP CAP dependencies."""
+    project_name = state.get("project_name", "App")
+    namespace = state.get("project_namespace", "com.company.app")
+    mta_id = project_name.lower().replace(" ", "-").replace("_", "-")
+    description = state.get("project_description", f"{project_name} - SAP CAP Application")
+
+    package = {
+        "name": mta_id,
+        "version": "1.0.0",
+        "description": description,
+        "repository": f"https://github.com/user/{mta_id}",
+        "license": "UNLICENSED",
+        "private": True,
+        "dependencies": {
+            "@sap/cds": "^7",
+            "express": "^4",
+            "@sap/xssec": "^3",
+            "passport": "^0.7"
+        },
+        "devDependencies": {
+            "@sap/cds-dk": "^7",
+            "@sap/ux-specification": "latest",
+            "rimraf": "^5"
+        },
+        "scripts": {
+            "start": "cds-serve",
+            "watch": "cds watch",
+            "build": "cds build --production",
+            "deploy": "mbt build && cf deploy mta_archives/*.mtar",
+            "undeploy": f"cf undeploy {mta_id} --delete-services --delete-service-keys --delete-service-brokers",
+            "clean": "rimraf gen mta_archives node_modules"
+        },
+        "cds": {
+            "requires": {
+                "db": {
+                    "kind": "sql"
+                }
+            },
+            "[production]": {
+                "requires": {
+                    "db": {
+                        "kind": "hana-cloud"
+                    },
+                    "auth": {
+                        "kind": "xsuaa"
+                    }
+                }
+            },
+            "[development]": {
+                "requires": {
+                    "db": {
+                        "kind": "sqlite",
+                        "credentials": {"database": ":memory:"}
+                    },
+                    "auth": {
+                        "kind": "mocked"
+                    }
+                }
+            }
+        },
+        "sapux": True
+    }
+    return json.dumps(package, indent=4)
+
+
+def generate_readme_md(state: BuilderState) -> str:
+    """Generate professional README.md."""
+    project_name = state.get("project_name", "App")
+    description = state.get("project_description", "SAP CAP Application")
+    entities = state.get("entities", [])
+
+    entity_list = "\n".join(f"- **{e.get('name', 'Entity')}**: {e.get('description', 'N/A')}" for e in entities)
+
+    return f"""# {project_name}
+
+{description}
+
+## Getting Started
+
+### Prerequisites
+
+- [Node.js](https://nodejs.org/) >= 18
+- [SAP CAP SDK](https://cap.cloud.sap/) (`npm i -g @sap/cds-dk`)
+- [Cloud Foundry CLI](https://github.com/cloudfoundry/cli) (for deployment)
+
+### Setup
+
+```bash
+npm ci
+cds watch
+```
+
+Open [http://localhost:4004](http://localhost:4004) to view the service.
+
+### Mock Users (Development)
+
+| User | Password | Role |
+|------|----------|------|
+| admin-user | admin123 | Admin |
+| editor-user | editor123 | Editor |
+| viewer-user | viewer123 | Viewer |
+
+## Data Model
+
+{entity_list}
+
+## Deployment
+
+### SAP BTP (Cloud Foundry)
+
+```bash
+mbt build
+cf deploy mta_archives/*.mtar
+```
+
+### Docker
+
+```bash
+docker-compose up -d
+```
+
+## Learn More
+
+- [SAP CAP Documentation](https://cap.cloud.sap/docs/)
+- [SAP Fiori Elements](https://experience.sap.com/fiori-design-web/)
+"""
+
+
+def generate_gitignore() -> str:
+    return """# Dependencies
+node_modules/
+
+# Build output
+gen/
+mta_archives/
+dist/
+*.mtar
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+*.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# SAP
+default-*.json
+resources/
+"""
+
+
+def generate_env_example() -> str:
+    return """# Server Configuration
+PORT=4004
+NODE_ENV=development
+
+# Database (production)
+HANA_HOST=
+HANA_PORT=
+HANA_USER=
+HANA_PASSWORD=
+HANA_DATABASE=
+
+# Authentication (production)
+XSUAA_URL=
+XSUAA_CLIENTID=
+XSUAA_CLIENTSECRET=
+"""
+
+
+def generate_npmrc() -> str:
+    return """@sap:registry=https://npm.sap.com
+"""
+
+
+def generate_editorconfig() -> str:
+    return """root = true
+
+[*]
+indent_style = space
+indent_size = 2
+end_of_line = lf
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[*.md]
+trim_trailing_whitespace = false
+"""
 
 
 def generate_github_actions(state: BuilderState) -> str:
@@ -412,10 +692,19 @@ async def deployment_agent(state: BuilderState) -> BuilderState:
     if not llm_success:
         log_progress(state, "Generating deployment config via template fallback...")
         try:
+            # Deployment files
             generated_files.append({"path": "mta.yaml", "content": generate_mta_yaml(state), "file_type": "yaml"})
             generated_files.append({"path": ".github/workflows/deploy.yml", "content": generate_github_actions(state), "file_type": "yaml"})
             generated_files.append({"path": "Dockerfile", "content": generate_dockerfile(state), "file_type": "dockerfile"})
             generated_files.append({"path": "docker-compose.yml", "content": generate_docker_compose(state), "file_type": "yaml"})
+
+            # Scaffold files
+            generated_files.append({"path": "package.json", "content": generate_package_json(state), "file_type": "json"})
+            generated_files.append({"path": "README.md", "content": generate_readme_md(state), "file_type": "markdown"})
+            generated_files.append({"path": ".gitignore", "content": generate_gitignore(), "file_type": "text"})
+            generated_files.append({"path": ".env.example", "content": generate_env_example(), "file_type": "text"})
+            generated_files.append({"path": ".npmrc", "content": generate_npmrc(), "file_type": "text"})
+            generated_files.append({"path": ".editorconfig", "content": generate_editorconfig(), "file_type": "text"})
         except Exception as e:
             logger.error(f"Template fallback failed for deployment: {e}")
             errors.append({"agent": "deployment", "code": "DEPLOYMENT_ERROR", "message": f"Deployment config failed: {str(e)}", "field": None, "severity": "error"})
