@@ -17,6 +17,7 @@ interface WizardLayoutProps {
   onPrevious: () => void;
   canProceed: boolean;
   isGenerating: boolean;
+  isFullWidth?: boolean;
   children: React.ReactNode;
 }
 
@@ -28,6 +29,7 @@ export default function WizardLayout({
   onPrevious,
   canProceed,
   isGenerating,
+  isFullWidth = false,
   children,
 }: WizardLayoutProps) {
   const isFirstStep = currentStep === 0;
@@ -76,7 +78,7 @@ export default function WizardLayout({
       </div>
 
       {/* Main content */}
-      <main className="flex-1 max-w-5xl mx-auto w-full px-6 py-8">
+      <main className={`flex-1 mx-auto w-full px-6 py-8 ${isFullWidth ? 'max-w-[90%]' : 'max-w-5xl'}`}>
         {/* Step title */}
         <div className="mb-8">
           <div className="text-sm text-blue-400 mb-1">
@@ -95,7 +97,7 @@ export default function WizardLayout({
 
       {/* Footer with navigation */}
       <footer className="glass border-t border-white/10 sticky bottom-0">
-        <div className="max-w-5xl mx-auto px-6 py-4 flex justify-between items-center">
+        <div className={`mx-auto px-6 py-4 flex justify-between items-center ${isFullWidth ? 'max-w-[90%]' : 'max-w-5xl'}`}>
           <button
             onClick={onPrevious}
             disabled={isFirstStep || isGenerating}

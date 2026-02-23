@@ -1076,6 +1076,7 @@ export default function BuilderPage() {
       onPrevious={handlePrevious}
       canProceed={canProceed()}
       isGenerating={isGenerating}
+      isFullWidth={currentStep === 8}
     >
       {renderStepContent()}
     </WizardLayout>
