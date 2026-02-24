@@ -52,6 +52,8 @@ class ChatResponse(BaseModel):
     updated_config: dict[str, Any]
     entities_preview: list[dict[str, Any]] | None = None
     suggested_followups: list[str] | None = None
+    change_type: str = "all"
+    agents_to_rerun: list[str] = []
     timestamp: str
 
 
@@ -161,6 +163,8 @@ async def send_chat_message(
         updated_config=updated_config,
         entities_preview=entities_preview,
         suggested_followups=suggested_followups,
+        change_type=result.get("change_type", "all"),
+        agents_to_rerun=result.get("agents_to_rerun", []),
         timestamp=datetime.utcnow().isoformat(),
     )
 

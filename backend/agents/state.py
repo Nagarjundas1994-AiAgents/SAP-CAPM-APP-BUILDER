@@ -286,6 +286,24 @@ class BuilderState(TypedDict, total=False):
     generation_completed_at: str | None
     
     # -------------------------------------------------------------------------
+    # Inter-Agent Context (agents see each other's actual output)
+    # -------------------------------------------------------------------------
+    generated_schema_cds: str      # Actual db/schema.cds from data_modeling agent
+    generated_common_cds: str      # Actual db/common.cds from data_modeling agent
+    generated_service_cds: str     # Actual srv/service.cds from service_exposure agent
+    generated_annotations_cds: str # Actual srv/annotations.cds from service_exposure agent
+    generated_handler_js: str      # Actual srv/service.js from business_logic agent
+    generated_manifest_json: str   # Actual manifest.json from fiori_ui agent
+
+    # -------------------------------------------------------------------------
+    # Self-Healing (validation → agent correction loop)
+    # -------------------------------------------------------------------------
+    needs_correction: bool               # Whether validation wants to loop back
+    validation_retry_count: int          # Number of self-healing correction loops completed
+    correction_agent: str | None         # Agent to route back to for correction
+    correction_context: dict | None      # { "issues": [...], "correction_prompt": "..." }
+
+    # -------------------------------------------------------------------------
     # LLM Provider
     # -------------------------------------------------------------------------
     llm_provider: str | None
@@ -363,6 +381,20 @@ def create_initial_state(
         generation_status=GenerationStatus.PENDING.value,
         generation_started_at=None,
         generation_completed_at=None,
+        
+        # Inter-Agent Context
+        generated_schema_cds="",
+        generated_common_cds="",
+        generated_service_cds="",
+        generated_annotations_cds="",
+        generated_handler_js="",
+        generated_manifest_json="",
+        
+        # Self-Healing
+        needs_correction=False,
+        validation_retry_count=0,
+        correction_agent=None,
+        correction_context=None,
         
         # LLM
         llm_provider=None,

@@ -52,10 +52,11 @@ class OpenAIProvider(LLMProvider):
         self.model = model
     
     def get_chat_model(self, **kwargs) -> BaseChatModel:
+        temperature = kwargs.pop("temperature", 0.1)
         return ChatOpenAI(
             api_key=self.api_key,
             model=self.model,
-            temperature=kwargs.get("temperature", 0.1),
+            temperature=temperature,
             **kwargs,
         )
     
@@ -80,10 +81,12 @@ class GeminiProvider(LLMProvider):
     def get_chat_model(self, **kwargs) -> BaseChatModel:
         try:
             from langchain_google_genai import ChatGoogleGenerativeAI
+            temperature = kwargs.pop("temperature", 0.1)
+            kwargs.pop("convert_system_message_to_human", None)
             return ChatGoogleGenerativeAI(
                 google_api_key=self.api_key,
                 model=self.model,
-                temperature=kwargs.get("temperature", 0.1),
+                temperature=temperature,
                 convert_system_message_to_human=True,
                 **kwargs,
             )
@@ -110,11 +113,12 @@ class DeepSeekProvider(LLMProvider):
         self.base_url = "https://api.deepseek.com/v1"
     
     def get_chat_model(self, **kwargs) -> BaseChatModel:
+        temperature = kwargs.pop("temperature", 0.1)
         return ChatOpenAI(
             api_key=self.api_key,
             model=self.model,
             base_url=self.base_url,
-            temperature=kwargs.get("temperature", 0.1),
+            temperature=temperature,
             **kwargs,
         )
     
@@ -138,11 +142,12 @@ class KimiProvider(LLMProvider):
         self.base_url = "https://api.moonshot.cn/v1"
     
     def get_chat_model(self, **kwargs) -> BaseChatModel:
+        temperature = kwargs.pop("temperature", 0.1)
         return ChatOpenAI(
             api_key=self.api_key,
             model=self.model,
             base_url=self.base_url,
-            temperature=kwargs.get("temperature", 0.1),
+            temperature=temperature,
             **kwargs,
         )
     

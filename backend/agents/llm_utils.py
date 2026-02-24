@@ -1,0 +1,227 @@
+"""
+Shared LLM Utilities for All Agents
+
+Provides common functions for LLM generation with retry logic,
+robust JSON parsing, and inter-agent context helpers.
+
+Used by all agents to eliminate duplicate code and ensure consistent
+LLM interaction patterns.
+"""
+
+import json
+import logging
+from typing import Any
+
+from backend.agents.llm_providers import get_llm_manager
+from backend.agents.state import BuilderState
+from backend.agents.progress import log_progress
+
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Robust JSON Parsing
+# =============================================================================
+
+def parse_llm_json(response_text: str) -> dict | None:
+    """
+    Robustly parse JSON from LLM response.
+    Handles markdown code fences, extra text, and common formatting issues.
+    """
+    if not response_text:
+        return None
+
+    text = response_text.strip()
+
+    # 1. Try direct parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Extract from markdown code fence
+    try:
+        if "```json" in text:
+            json_str = text.split("```json", 1)[1].split("```", 1)[0].strip()
+            return json.loads(json_str)
+        elif "```" in text:
+            json_str = text.split("```", 1)[1].split("```", 1)[0].strip()
+            return json.loads(json_str)
+    except (json.JSONDecodeError, IndexError):
+        pass
+
+    # 3. Find first { ... last }
+    try:
+        start = text.index("{")
+        end = text.rindex("}") + 1
+        return json.loads(text[start:end])
+    except (ValueError, json.JSONDecodeError):
+        pass
+
+    return None
+
+
+# =============================================================================
+# LLM Generation with Retry and Self-Healing
+# =============================================================================
+
+async def generate_with_retry(
+    prompt: str,
+    system_prompt: str,
+    state: BuilderState,
+    required_keys: list[str] | None = None,
+    max_retries: int = 3,
+    agent_name: str = "agent",
+) -> dict | None:
+    """
+    Call LLM with retry logic and self-healing.
+
+    If JSON parsing fails or required keys are missing, feeds the error
+    back to the LLM for correction.
+
+    Args:
+        prompt: The user/generation prompt
+        system_prompt: System prompt with instructions
+        state: Current BuilderState (for provider and logging)
+        required_keys: Keys that must be present in the JSON response
+        max_retries: Maximum number of retry attempts
+        agent_name: Name of the calling agent (for logging)
+
+    Returns:
+        Parsed JSON dict or None if all attempts fail
+    """
+    llm_manager = get_llm_manager()
+    provider = state.get("llm_provider")
+    current_prompt = prompt
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            response = await llm_manager.generate(
+                prompt=current_prompt,
+                system_prompt=system_prompt,
+                provider=provider,
+                temperature=0.1 if attempt == 0 else 0.05,
+            )
+
+            parsed = parse_llm_json(response)
+
+            if parsed and isinstance(parsed, dict):
+                # Check required keys if specified
+                if required_keys:
+                    missing = [k for k in required_keys if k not in parsed or not parsed[k]]
+                    if missing:
+                        last_error = f"Missing required keys: {missing}"
+                        log_progress(state, f"⚠️ [{agent_name}] Attempt {attempt + 1}: {last_error}. Retrying...")
+
+                        if attempt < max_retries - 1:
+                            current_prompt = f"""Your previous response was missing required keys: {missing}
+
+Previous response (first 500 chars): {response[:500]}
+
+CRITICAL: Your JSON response MUST contain these keys: {required_keys}
+Respond with ONLY valid JSON. No markdown, no extra text.
+
+{prompt}"""
+                        continue
+                
+                log_progress(state, f"✅ [{agent_name}] LLM generation successful (attempt {attempt + 1}).")
+                return parsed
+            else:
+                last_error = "Could not parse JSON from response"
+                log_progress(state, f"⚠️ [{agent_name}] Attempt {attempt + 1}: {last_error}. Retrying...")
+
+            # Build correction prompt for next attempt
+            if attempt < max_retries - 1:
+                current_prompt = f"""Your previous response could not be parsed as JSON. Error: {last_error}
+
+Previous response (first 500 chars): {response[:500]}
+
+CRITICAL: You MUST respond with ONLY valid JSON. No markdown formatting, no explanation text.
+Start your response with {{ and end with }}.
+
+{prompt}"""
+
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"[{agent_name}] LLM attempt {attempt + 1} failed: {e}")
+            log_progress(state, f"⚠️ [{agent_name}] Attempt {attempt + 1} error: {str(e)[:100]}. Retrying...")
+
+            if attempt < max_retries - 1:
+                current_prompt = prompt  # Reset to original prompt on exception
+
+    logger.error(f"[{agent_name}] All {max_retries} LLM attempts failed. Last error: {last_error}")
+    return None
+
+
+# =============================================================================
+# Inter-Agent Context Helpers
+# =============================================================================
+
+def get_schema_context(state: BuilderState) -> str:
+    """Get the generated schema CDS for downstream agents."""
+    schema = state.get("generated_schema_cds", "")
+    common = state.get("generated_common_cds", "")
+    if schema:
+        ctx = "GENERATED CDS SCHEMA (from Data Modeling Agent):\n```cds\n"
+        if common:
+            ctx += f"// db/common.cds\n{common}\n\n"
+        ctx += f"// db/schema.cds\n{schema}\n```\n"
+        return ctx
+    return ""
+
+
+def get_service_context(state: BuilderState) -> str:
+    """Get the generated service CDS for downstream agents."""
+    service = state.get("generated_service_cds", "")
+    annotations = state.get("generated_annotations_cds", "")
+    if service:
+        ctx = "GENERATED SERVICE DEFINITION (from Service Exposure Agent):\n```cds\n"
+        ctx += f"// srv/service.cds\n{service}\n"
+        if annotations:
+            ctx += f"\n// srv/annotations.cds\n{annotations}\n"
+        ctx += "```\n"
+        return ctx
+    return ""
+
+
+def get_handler_context(state: BuilderState) -> str:
+    """Get the generated handler JS for downstream agents."""
+    handler = state.get("generated_handler_js", "")
+    if handler:
+        return f"GENERATED SERVICE HANDLER (from Business Logic Agent):\n```javascript\n{handler}\n```\n"
+    return ""
+
+
+def get_full_context(state: BuilderState) -> str:
+    """Get all available inter-agent context."""
+    parts = []
+    schema_ctx = get_schema_context(state)
+    if schema_ctx:
+        parts.append(schema_ctx)
+    service_ctx = get_service_context(state)
+    if service_ctx:
+        parts.append(service_ctx)
+    handler_ctx = get_handler_context(state)
+    if handler_ctx:
+        parts.append(handler_ctx)
+    return "\n".join(parts)
+
+
+def store_generated_content(state: BuilderState, artifacts: list, key_map: dict[str, str]) -> None:
+    """
+    Store generated file content in state for inter-agent context.
+
+    Args:
+        state: BuilderState to update
+        artifacts: List of GeneratedFile dicts
+        key_map: Mapping of file path patterns to state keys
+                 e.g., {"schema.cds": "generated_schema_cds"}
+    """
+    for artifact in artifacts:
+        path = artifact.get("path", "")
+        content = artifact.get("content", "")
+        for pattern, state_key in key_map.items():
+            if pattern in path:
+                state[state_key] = content
+                break

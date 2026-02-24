@@ -1,0 +1,30 @@
+# Run SAP CAPM APP BUILDER - Full App Launch & Test
+
+## 1. Start Backend Server
+- [ ] Activate Python virtual environment
+- [ ] Start FastAPI backend (`python -m backend.main`)
+- [ ] Verify health endpoint at `http://localhost:8000/api/health`
+
+## 2. Start Frontend Server
+- [ ] Install/verify npm dependencies
+- [ ] Start Next.js dev server (`npm run dev`)
+- [ ] Verify frontend at `http://localhost:3000`
+
+## 3. End-to-End Walkthrough (Browser Test)
+- [ ] Visit landing page at `http://localhost:3000`
+- [ ] Navigate to Builder wizard at `/builder`
+- [ ] Step 0: Create project (name, namespace, description, LLM provider)
+- [ ] Step 1: Select a domain template (e.g., E-Commerce)
+- [ ] Step 2: Verify/modify entities
+- [ ] Step 3-5: Configure services, UI theme, security
+- [ ] Step 6: Review AI-generated implementation plan
+- [ ] Step 7: Trigger generation and monitor agent progress
+- [ ] Step 8: Verify artifacts, preview, and download
+
+## 4. Fix Issues Found During Testing
+- [ ] Fix any backend startup errors
+- [ ] Fix any frontend build/runtime errors
+- [ ] Fix any API communication issues
+
+## 5. Create Walkthrough Documentation
+- [ ] Document the full end-to-end flow with screenshots

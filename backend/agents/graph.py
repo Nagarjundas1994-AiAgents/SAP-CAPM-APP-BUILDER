@@ -53,6 +53,19 @@ def should_continue_after_requirements(state: BuilderState) -> Literal["data_mod
     return "data_modeling"
 
 
+def should_self_heal(state: BuilderState) -> str:
+    """
+    After validation, decide whether to loop back for self-healing
+    or end the workflow.
+    """
+    if state.get("needs_correction"):
+        target = state.get("correction_agent", "")
+        if target in ("data_modeling", "service_exposure", "business_logic", "fiori_ui", "security"):
+            logger.info(f"Self-healing: routing back to {target}")
+            return target
+    return "end"
+
+
 # =============================================================================
 # Graph Builder
 # =============================================================================
@@ -70,7 +83,7 @@ def create_builder_graph() -> StateGraph:
     6. Security
     7. Extension
     8. Deployment
-    9. Validation (final)
+    9. Validation (final) → self-heal or END
     """
     
     # Create the graph
@@ -172,8 +185,19 @@ def create_builder_graph() -> StateGraph:
         }
     )
     
-    # 9. Validation (final)
-    graph.add_edge("validation", END)
+    # 9. Validation → self-heal back to agent OR end
+    graph.add_conditional_edges(
+        "validation",
+        should_self_heal,
+        {
+            "data_modeling": "data_modeling",
+            "service_exposure": "service_exposure",
+            "business_logic": "business_logic",
+            "fiori_ui": "fiori_ui",
+            "security": "security",
+            "end": END,
+        }
+    )
     
     return graph
 
@@ -216,7 +240,7 @@ async def run_generation_workflow(initial_state: BuilderState) -> BuilderState:
         logger.info("Generation workflow completed")
         return final_state
     except Exception as e:
-        logger.error(f"Generation workflow failed: {e}")
+        logger.exception(f"Generation workflow failed: {e}")
         initial_state["generation_status"] = GenerationStatus.FAILED.value
         initial_state["validation_errors"] = initial_state.get("validation_errors", []) + [{
             "agent": "workflow",
@@ -316,8 +340,10 @@ async def run_generation_workflow_streaming(initial_state: BuilderState):
                 "timestamp": datetime.utcnow().isoformat(),
             })
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             workflow_error = e
-            logger.error(f"Streaming workflow failed: {e}")
+            logger.exception(f"Streaming workflow failed: {e}")
             await push_event(session_id, {
                 "type": "workflow_error",
                 "status": "failed",
