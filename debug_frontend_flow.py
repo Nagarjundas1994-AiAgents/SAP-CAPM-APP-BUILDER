@@ -7,8 +7,8 @@ async def main():
         # Step 1: Create session
         print("Creating session...")
         res = await client.post("http://localhost:8000/api/sessions", json={
-            "project_name": "Ecommerce Test",
-            "project_description": "An ecommerce platform"
+            "project_name": "Hospital Management System",
+            "project_description": "A comprehensive hospital management and patient records system"
         })
         res.raise_for_status()
         session_id = res.json()["id"]
@@ -18,12 +18,12 @@ async def main():
         print("PUT config...")
         config = {
             "configuration": {
-                "domain": "ecommerce",
-                "entities": [{"name": e, "fields": []} for e in ["Product", "Category", "Order", "OrderItem", "Customer", "Review"]],
-                "llm_provider": "gemini",
+                "domain": "healthcare",
+                "entities": [{"name": e, "fields": []} for e in ["Patient", "Doctor", "Appointment", "Department", "MedicalRecord", "Prescription", "Billing", "Room"]],
+                "llm_provider": "openai",
                 "fiori_theme": "sap_horizon",
                 "auth_type": "mock",
-                "fiori_main_entity": "Product"
+                "fiori_main_entity": "Patient"
             }
         }
         res = await client.put(f"http://localhost:8000/api/sessions/{session_id}/config", json=config)

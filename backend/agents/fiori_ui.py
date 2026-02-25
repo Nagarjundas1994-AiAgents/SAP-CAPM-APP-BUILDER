@@ -134,6 +134,14 @@ async def fiori_ui_agent(state: BuilderState) -> BuilderState:
     # Inject knowledge into prompt
     prompt = f"{knowledge}\n\n{prompt}"
 
+    # Self-Healing: Inject correction context if present
+    correction_context = state.get("correction_context")
+    if state.get("needs_correction") and state.get("correction_agent") == "fiori_ui" and correction_context:
+        log_progress(state, "Applying self-healing correction context from validation agent...")
+        correction_prompt = correction_context.get("correction_prompt", "")
+        if correction_prompt:
+            prompt = f"CRITICAL CORRECTION REQUIRED:\n{correction_prompt}\n\nORIGINAL INSTRUCTIONS:\n{prompt}"
+
     log_progress(state, "Calling LLM for Fiori UI generation...")
 
     result = await generate_with_retry(

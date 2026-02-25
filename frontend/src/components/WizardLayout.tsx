@@ -121,7 +121,7 @@ export default function WizardLayout({
             }`}
           >
             {isLastStep ? (
-              isGenerating ? 'Generating...' : 'Generate App'
+              isGenerating ? 'Generating...' : '✓ Complete'
             ) : (
               <>
                 Next

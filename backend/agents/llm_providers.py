@@ -74,7 +74,7 @@ class GeminiProvider(LLMProvider):
     def name(self) -> str:
         return "gemini"
     
-    def __init__(self, api_key: str, model: str = "gemini-1.5-pro"):
+    def __init__(self, api_key: str, model: str = "gemini-1.5-flash"):
         self.api_key = api_key
         self.model = model
     
@@ -119,6 +119,7 @@ class DeepSeekProvider(LLMProvider):
             model=self.model,
             base_url=self.base_url,
             temperature=temperature,
+            max_tokens=8192,
             **kwargs,
         )
     
@@ -216,8 +217,11 @@ class LLMManager:
         Raises:
             ValueError: If provider is not available
         """
-        provider_name = name or self.settings.default_llm_provider
-        
+        if name is None:
+            provider_name = self.settings.default_llm_provider
+        else:
+            provider_name = name
+
         if provider_name not in self._providers:
             available = ", ".join(self.available_providers) or "none"
             raise ValueError(

@@ -32,15 +32,20 @@ Generate production-ready deployment configurations.
 
 STRICT RULES:
 1. mta.yaml: Standard SAP MTA Build Tool descriptor
-   - Include srv module, db-deployer, UI content, XSUAA, HDI container
-   - Use proper SAP buildpacks
-   - Include managed-approuter if needed
+   - MUST include `srv` and `db` (hdi-deployer) modules.
+   - MUST include `hana` service (org.cloudfoundry.managed-service, hdi-shared).
+   - MUST include `xsuaa` service (org.cloudfoundry.managed-service, application).
+   - Use proper SAP buildpacks (nodejs_buildpack).
+   - Generate approuter module (managed-approuter or standalone) binding to xsuaa and srv.
 2. package.json: SAP CAP project dependencies
-   - @sap/cds, @sap/cds-dk, @sap/cds-hana, hdb
-   - Correct scripts: start, build, deploy
+   - MUST include `@sap/cds`, `@sap/cds-dk`, `@sap/cds-hana`, `hdb`.
+   - Correct scripts: `start`, `build`, `deploy`.
+   - MUST contain an `auth` section in `cds.requires` matching XSUAA.
+   - MUST contain a `db` section in `cds.requires` matching HANA.
 3. .npmrc: SAP NPM registry configuration
 4. .env.sample: Environment variable template
 5. README.md: Project-specific getting started guide
+6. .pipeline/config.yml: Project Piper CI/CD configuration.
 
 OUTPUT FORMAT:
 {
@@ -51,7 +56,8 @@ OUTPUT FORMAT:
     "readme_md": "... README.md content ...",
     "gitignore": "... .gitignore content ...",
     "eslintrc_json": "... .eslintrc.json ...",
-    "prettierrc_json": "... .prettierrc.json ..."
+    "prettierrc_json": "... .prettierrc.json ...",
+    "piper_config_yml": "... .pipeline/config.yml ..."
 }
 Return ONLY valid JSON."""
 
@@ -132,6 +138,7 @@ async def deployment_agent(state: BuilderState) -> BuilderState:
             "gitignore": (".gitignore", "config"),
             "eslintrc_json": (".eslintrc.json", "json"),
             "prettierrc_json": (".prettierrc.json", "json"),
+            "piper_config_yml": (".pipeline/config.yml", "yaml"),
         }
         for key, (path, file_type) in file_map.items():
             content = result.get(key, "")

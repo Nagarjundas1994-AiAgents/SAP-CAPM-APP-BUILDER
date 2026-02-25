@@ -44,12 +44,19 @@ ARCHITECTURE RULES:
 2. Destructure entities: `const { Entity1, Entity2 } = this.entities;`
 3. Use `cds.log()` for structured logging: `const LOG = cds.log('service-name');`
 4. Events: `this.before('CREATE', Entity, handler)`, `this.after('READ', Entity, handler)`, `this.on('approve', handler)`
-5. CDS QL patterns:
-   - SELECT: `const result = await SELECT.from(Entity).where({field: value});`
-   - INSERT: `await INSERT.into(Entity).entries(data);`
-   - UPDATE: `await UPDATE(Entity).set({field: value}).where({ID: id});`
-   - DELETE: `await DELETE.from(Entity).where({ID: id});`
-   - Aggregate: `const { count } = await SELECT.one.from(Entity).columns('count(*) as count');`
+5. CDS QL patterns (MUST USE `cds.tx(req)` for transactional safety):
+   - Obtain transaction: `const tx = cds.tx(req);`
+   - SELECT: `const result = await tx.run(SELECT.from(Entity).where({field: value}));`
+   - INSERT: `await tx.run(INSERT.into(Entity).entries(data));`
+   - UPDATE: `await tx.run(UPDATE(Entity).set({field: value}).where({ID: id}));`
+   - DELETE: `await tx.run(DELETE.from(Entity).where({ID: id}));`
+   - Aggregate: `const { count } = await tx.run(SELECT.one.from(Entity).columns('count(*) as count'));`
+
+6. ROBUST ERROR HANDLING (MANDATORY):
+   - Wrap all logic in `try ... catch` blocks.
+   - On error, rollback is automatic, but log with `LOG.error(e)`.
+   - Reject bad inputs using `req.reject(400, 'Message')`.
+   - Warn non-fatal issues using `req.warn(400, 'Warning Message')`.
 
 STATUS STATE MACHINES — implement for every entity with a 'status' field:
 ```javascript
@@ -244,6 +251,14 @@ async def business_logic_agent(state: BuilderState) -> BuilderState:
 
     # Inject knowledge into prompt
     prompt = f"{knowledge}\n\n{prompt}"
+
+    # Self-Healing: Inject correction context if present
+    correction_context = state.get("correction_context")
+    if state.get("needs_correction") and state.get("correction_agent") == "business_logic" and correction_context:
+        log_progress(state, "Applying self-healing correction context from validation agent...")
+        correction_prompt = correction_context.get("correction_prompt", "")
+        if correction_prompt:
+            prompt = f"CRITICAL CORRECTION REQUIRED:\n{correction_prompt}\n\nORIGINAL INSTRUCTIONS:\n{prompt}"
 
     log_progress(state, "Calling LLM for business logic generation...")
 

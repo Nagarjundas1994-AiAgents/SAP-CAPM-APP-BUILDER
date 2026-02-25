@@ -23,6 +23,7 @@ import {
   RelationshipDefinition,
   BusinessRule,
 } from '@/lib/api';
+import SchemaVisualizer from './SchemaVisualizer';
 
 interface PlanReviewProps {
   plan: ImplementationPlan;
@@ -180,12 +181,21 @@ export default function PlanReview({
         </div>
       </div>
 
-      {/* Entities Section */}
+      {/* Visual Schema Map */}
       <div className="space-y-3">
+        <h3 className="text-sm font-medium text-gray-300 flex items-center gap-2">
+          <Database className="w-4 h-4 text-blue-400" />
+          Visual Schema Map
+        </h3>
+        <SchemaVisualizer entities={plan.entities} />
+      </div>
+
+      {/* Entities Section */}
+      <div className="space-y-3 mt-8">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-medium text-gray-300 flex items-center gap-2">
             <Database className="w-4 h-4 text-blue-400" />
-            Entities ({plan.entities.length})
+            Entity Details ({plan.entities.length})
           </h3>
           <button
             onClick={() => setShowAddEntity(true)}

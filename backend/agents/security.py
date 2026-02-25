@@ -33,9 +33,15 @@ Generate production-ready security configurations for SAP CAP applications.
 
 STRICT RULES:
 1. xs-security.json: XSUAA config with scopes, role templates, role collections
+   - MUST define `xsappname`.
+   - MUST define scopes with `.Read`, `.Write`, `.Admin` suffixes.
+   - MUST define `role-templates` binding those scopes.
+   - MUST define `role-collections` (e.g., `Viewer`, `Manager`, `Admin`) containing those templates.
 2. CDS auth: @requires and @restrict annotations for fine-grained access
+   - Add service-level `@requires: 'authenticated-user'`
+   - Define entity-level `@restrict: [{ grant: 'READ', to: 'Viewer' }, ...]`
 3. Mock users: CSV for development testing with all roles covered
-4. .cdsrc.json: Auth configuration for production and development
+4. .cdsrc.json: Auth configuration for production and development (mocked).
 
 Use RBAC with at minimum: Viewer (read), Editor (read+write), Admin (all).
 For draft-enabled entities, include proper draft authorization.
@@ -102,6 +108,14 @@ async def security_agent(state: BuilderState) -> BuilderState:
 
     # Inject knowledge into prompt
     prompt = f"{knowledge}\n\n{prompt}"
+
+    # Self-Healing: Inject correction context if present
+    correction_context = state.get("correction_context")
+    if state.get("needs_correction") and state.get("correction_agent") == "security" and correction_context:
+        log_progress(state, "Applying self-healing correction context from validation agent...")
+        correction_prompt = correction_context.get("correction_prompt", "")
+        if correction_prompt:
+            prompt = f"CRITICAL CORRECTION REQUIRED:\n{correction_prompt}\n\nORIGINAL INSTRUCTIONS:\n{prompt}"
 
     log_progress(state, "Calling LLM for security configuration...")
 

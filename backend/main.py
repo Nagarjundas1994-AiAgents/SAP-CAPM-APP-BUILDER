@@ -177,11 +177,12 @@ async def get_config():
 # Import and include API routers
 # =============================================================================
 
-from backend.api import sessions, builder, plan, chat
+from backend.api import sessions, builder, plan, chat, copilot
 app.include_router(sessions.router, prefix="/api/sessions", tags=["sessions"])
 app.include_router(builder.router, prefix="/api/builder", tags=["builder"])
 app.include_router(plan.router, prefix="/api/builder", tags=["plan"])
 app.include_router(chat.router, prefix="/api/builder", tags=["chat"])
+app.include_router(copilot.router, prefix="/api/builder", tags=["copilot"])
 
 
 # =============================================================================

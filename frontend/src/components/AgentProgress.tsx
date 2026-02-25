@@ -119,27 +119,50 @@ export default function AgentProgress({
               )}
             </div>
 
-            {/* Real-time Logs */}
+            {/* Real-time Logs (Hacker Terminal Style) */}
             {(status === 'running' || agentLogs) && (
-              <div className="ml-12 mr-2">
-                <div className="bg-black/40 border border-white/5 rounded-lg p-3 font-mono text-[11px] max-h-48 overflow-y-auto scrollbar-thin scrollbar-thumb-white/10">
+              <div className="ml-12 mr-2 mt-2">
+                <div className="bg-black/80 border border-blue-500/20 rounded-lg p-4 font-mono text-[13px] max-h-64 overflow-y-auto scrollbar-thin scrollbar-thumb-blue-500/20 shadow-inner relative group">
+                  <div className="absolute top-2 right-2 flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <div className="w-2.5 h-2.5 rounded-full bg-red-500/50"></div>
+                    <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/50"></div>
+                    <div className="w-2.5 h-2.5 rounded-full bg-green-500/50"></div>
+                  </div>
+                  
                   {agentLogs ? (
-                    <div className="space-y-1">
-                      {agentLogs.split('\n').filter(Boolean).map((log, i) => (
-                        <div key={i} className="flex gap-2 text-gray-400">
-                          <span className="text-blue-500/50 flex-shrink-0 animate-pulse">›</span>
-                          <span className="break-all">{log}</span>
-                        </div>
-                      ))}
+                    <div className="space-y-1.5">
+                      {agentLogs.split('\n').filter(Boolean).map((log, i) => {
+                        const isError = log.toLowerCase().includes('error') || log.toLowerCase().includes('failed');
+                        const isSuccess = log.toLowerCase().includes('success') || log.toLowerCase().includes('completed');
+                        
+                        return (
+                          <div key={i} className="flex gap-3 text-gray-300">
+                            <span className="text-blue-500/50 flex-shrink-0 select-none">~</span>
+                            <span className={`break-all tracking-wide ${isError ? 'text-red-400' : isSuccess ? 'text-green-400' : 'text-blue-100/80'}`}>
+                              {log}
+                            </span>
+                          </div>
+                        );
+                      })}
                       {status === 'running' && (
-                        <div className="flex gap-2 text-blue-400 animate-pulse">
-                          <span>›</span>
-                          <span className="animate-blink italic">Agent is thinking...</span>
+                        <div className="flex gap-3 text-blue-400 pt-2">
+                          <span className="select-none animate-pulse">~</span>
+                          <span className="animate-pulse flex items-center gap-1">
+                            Processing
+                            <span className="flex gap-1 items-center h-full">
+                              <span className="w-1 h-1 bg-blue-400 rounded-full animate-bounce [animation-delay:-0.3s]"></span>
+                              <span className="w-1 h-1 bg-blue-400 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
+                              <span className="w-1 h-1 bg-blue-400 rounded-full animate-bounce"></span>
+                            </span>
+                          </span>
                         </div>
                       )}
                     </div>
                   ) : (
-                    <div className="text-gray-600 italic">Initializing agent...</div>
+                    <div className="flex items-center gap-2 text-gray-500 italic">
+                      <span className="animate-spin w-3 h-3 border-2 border-gray-500 border-t-transparent rounded-full" />
+                      Initializing terminal stream...
+                    </div>
                   )}
                 </div>
               </div>

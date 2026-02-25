@@ -14,8 +14,27 @@ import {
   Rocket,
   FileCode,
   Search,
+  Bot,
 } from 'lucide-react';
-import { Artifact, GenerationResult } from '@/lib/api';
+import { Editor } from '@monaco-editor/react';
+import { Artifact, GenerationResult, copilotEditArtifact } from '@/lib/api';
+
+// Helper to determine Monaco language from file extension or type
+const getLanguage = (fileTypeOrPath: string) => {
+  const ext = fileTypeOrPath.split('.').pop()?.toLowerCase() || fileTypeOrPath.toLowerCase();
+  switch (ext) {
+    case 'js': case 'jsx': return 'javascript';
+    case 'ts': case 'tsx': return 'typescript';
+    case 'json': return 'json';
+    case 'html': return 'html';
+    case 'css': return 'css';
+    case 'yaml': case 'yml': return 'yaml';
+    case 'md': return 'markdown';
+    case 'cds': return 'sql'; // Fallback for CDS highlighting
+    case 'csv': return 'plaintext';
+    default: return 'plaintext';
+  }
+};
 
 interface ArtifactEditorProps {
   result: GenerationResult;
@@ -33,6 +52,9 @@ export default function ArtifactEditor({
   const [isSaving, setIsSaving] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set(['db', 'srv', 'app', 'deployment', 'docs']));
+  
+  const [copilotPrompt, setCopilotPrompt] = useState('');
+  const [isCopilotLoading, setIsCopilotLoading] = useState(false);
 
   // All artifacts flattened
   const allArtifacts = [
@@ -64,6 +86,25 @@ export default function ArtifactEditor({
       console.error('Failed to save artifact:', error);
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  const handleCopilotEdit = async () => {
+    if (!selectedFile || !copilotPrompt.trim()) return;
+    setIsCopilotLoading(true);
+    try {
+      const response = await copilotEditArtifact(result.session_id, {
+        path: selectedFile.path,
+        prompt: copilotPrompt.trim(),
+      });
+      setEditedContent(response.content);
+      selectedFile.content = response.content;
+      setCopilotPrompt(''); // Clear prompt on success
+    } catch (error: any) {
+      console.error('Copilot edit failed:', error);
+      alert('Copilot Edit Failed: ' + (error.message || 'Unknown error'));
+    } finally {
+      setIsCopilotLoading(false);
     }
   };
 
@@ -194,23 +235,62 @@ export default function ArtifactEditor({
                     {isSaving ? 'Saving...' : 'Save Changes'}
                   </button>
                 </div>
-                <div className="flex-1 overflow-hidden relative">
-                  <textarea
-                    value={editedContent}
-                    onChange={(e) => setEditedContent(e.target.value)}
-                    className="w-full h-full p-6 bg-transparent text-gray-300 font-mono text-sm resize-none focus:outline-none leading-relaxed"
-                    spellCheck={false}
+                
+                {/* Copilot Bar */}
+                <div className="px-6 py-2 border-b border-white/10 bg-indigo-500/10 flex items-center gap-3">
+                  <Bot className="w-5 h-5 text-indigo-400" />
+                  <input
+                    type="text"
+                    value={copilotPrompt}
+                    onChange={(e) => setCopilotPrompt(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleCopilotEdit()}
+                    placeholder={`Ask AI Copilot to modify ${selectedFile.path.split('/').pop()}...`}
+                    disabled={isCopilotLoading}
+                    className="flex-1 bg-black/20 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white placeholder-indigo-300/50 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/30 transition-all"
                   />
-                  {/* Subtle line numbers or grid can be added here */}
+                  <button
+                    onClick={handleCopilotEdit}
+                    disabled={!copilotPrompt.trim() || isCopilotLoading}
+                    className="flex items-center gap-2 px-3 py-1.5 bg-indigo-600/30 text-indigo-300 hover:text-white text-xs font-semibold rounded-lg hover:bg-indigo-600/50 transition-all border border-indigo-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isCopilotLoading ? (
+                      <>
+                        <div className="w-3.5 h-3.5 border-2 border-indigo-300/30 border-t-indigo-300 rounded-full animate-spin"></div>
+                        <span>Editing...</span>
+                      </>
+                    ) : (
+                      <span>Ask AI</span>
+                    )}
+                  </button>
+                </div>
+
+                <div className="flex-1 overflow-hidden relative">
+                  <Editor
+                    height="100%"
+                    language={getLanguage(selectedFile.file_type || selectedFile.path)}
+                    theme="vs-dark"
+                    value={editedContent}
+                    onChange={(value) => setEditedContent(value || '')}
+                    options={{
+                      minimap: { enabled: true },
+                      fontSize: 14,
+                      wordWrap: 'on',
+                      scrollBeyondLastLine: false,
+                      smoothScrolling: true,
+                      padding: { top: 16 },
+                      fontFamily: "'JetBrains Mono', 'Fira Code', 'Courier New', monospace",
+                    }}
+                    loading={<div className="flex items-center justify-center text-gray-400">Loading IDE...</div>}
+                  />
                 </div>
               </>
             ) : (
               <div className="flex-1 flex flex-col items-center justify-center text-gray-500">
                 <div className="p-6 bg-white/5 rounded-full mb-4">
-                  <File className="w-12 h-12 opacity-20" />
+                  <FileCode className="w-12 h-12 text-blue-400/50" />
                 </div>
-                <p>Select a file from the sidebar to start editing</p>
-                <p className="text-sm opacity-50">You can customize the generated code here</p>
+                <p className="text-lg font-medium text-gray-300">Select a file to edit</p>
+                <p className="text-sm opacity-50 mt-2">Powered by Monaco Editor (VS Code Engine)</p>
               </div>
             )}
           </div>

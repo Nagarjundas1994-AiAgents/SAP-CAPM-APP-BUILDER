@@ -42,72 +42,64 @@ def load_knowledge(filename: str) -> str:
         return ""
 
 
+from backend.knowledge.retriever import query_sap_knowledge
+
 def get_data_modeling_knowledge() -> str:
     """Get knowledge relevant to the data modeling agent."""
-    types = load_knowledge("cds_types.md")
-    annotations = load_knowledge("cds_annotations.md")
+    query = "CDS schema definition syntax entities fields types associations compositions cuid managed"
+    rag_content = query_sap_knowledge(query, k=5)
     
     return f"""
---- SAP CDS REFERENCE DOCUMENTATION (USE ONLY THESE PATTERNS) ---
-
-{types}
-
---- KEY ANNOTATION PATTERNS ---
-
-{_extract_section(annotations, "## UI Annotations", "## Common Annotations")}
-
+--- SAP CDS REFERENCE DOCUMENTATION (RAG Context) ---
+{rag_content}
 --- END REFERENCE ---
 """
 
 
 def get_service_knowledge() -> str:
     """Get knowledge relevant to the service exposure agent."""
-    annotations = load_knowledge("cds_annotations.md")
+    query = "CDS service projection annotations OData actions functions @readonly @insertonly @UI"
+    rag_content = query_sap_knowledge(query, k=5)
     
     return f"""
---- SAP ANNOTATION REFERENCE (USE ONLY THESE PATTERNS) ---
-
-{annotations}
-
+--- SAP ANNOTATION REFERENCE (RAG Context) ---
+{rag_content}
 --- END REFERENCE ---
 """
 
 
 def get_business_logic_knowledge() -> str:
     """Get knowledge relevant to the business logic agent."""
-    logic = load_knowledge("business_logic.md")
+    query = "SAP CAP Node.js handlers module.exports cds.service.impl this.on this.before this.after SELECT INSERT UPDATE DELETE srv/service.js"
+    rag_content = query_sap_knowledge(query, k=5)
     
     return f"""
---- SAP CAP HANDLER REFERENCE (USE ONLY THESE PATTERNS) ---
-
-{logic}
-
+--- SAP CAP HANDLER REFERENCE (RAG Context) ---
+{rag_content}
 --- END REFERENCE ---
 """
 
 
 def get_fiori_knowledge() -> str:
     """Get knowledge relevant to the Fiori UI agent."""
-    fiori = load_knowledge("fiori_elements.md")
+    query = "SAP Fiori Elements manifest.json sap.app sap.ui5 dataSources routing FlexibleColumnLayout Component.js"
+    rag_content = query_sap_knowledge(query, k=5)
     
     return f"""
---- SAP FIORI ELEMENTS REFERENCE (USE ONLY THESE PATTERNS) ---
-
-{fiori}
-
+--- SAP FIORI ELEMENTS REFERENCE (RAG Context) ---
+{rag_content}
 --- END REFERENCE ---
 """
 
 
 def get_security_knowledge() -> str:
     """Get knowledge relevant to security and deployment agents."""
-    sec = load_knowledge("security_and_deployment.md")
+    query = "SAP BTP security xs-security.json XSUAA scopes role-templates @requires @restrict authorization"
+    rag_content = query_sap_knowledge(query, k=5)
     
     return f"""
---- SAP SECURITY & DEPLOYMENT REFERENCE (USE ONLY THESE PATTERNS) ---
-
-{sec}
-
+--- SAP SECURITY REFERENCE (RAG Context) ---
+{rag_content}
 --- END REFERENCE ---
 """
 

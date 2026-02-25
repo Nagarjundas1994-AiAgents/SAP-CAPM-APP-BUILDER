@@ -40,6 +40,10 @@ dependencies = [
     
     # File handling
     "aiofiles>=23.2.1",
+    
+    # Text Analysis
+    "sentence-transformers>=2.3.1",
+    "chromadb>=0.4.22",
 ]
 
 [project.optional-dependencies]

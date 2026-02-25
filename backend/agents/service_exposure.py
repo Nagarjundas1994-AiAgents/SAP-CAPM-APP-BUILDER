@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # System Prompt
 # =============================================================================
 
-SERVICE_SYSTEM_PROMPT = """You are a senior SAP CAP service architect with deep expertise in Fiori Elements.
+SERVICE_SYSTEM_PROMPT = """You are a senior SAP CAP service architect with deep expertise in OData V4 and Fiori Elements.
 Generate production-ready, enterprise-grade OData service definitions and Fiori annotations.
 
 STRICT RULES:
@@ -44,16 +44,20 @@ STRICT RULES:
    - Import schema: `using { namespace as db } from '../db/schema';`
    - Declare: `service ServiceName @(path: '/endpoint') { ... }`
    - Use projections: `entity X as projection on db.X;`
-   - Add `@odata.draft.enabled` for root entities (NOT child/composition entities)
+   - Add `@odata.draft.enabled` for ALL root/header entities (NOT child/composition entities) to support Fiori Elements edit flows.
    - Define custom actions for every business rule:
      - `action approve() returns Boolean;` (bound to entity)
      - `function getDashboard() returns array of DashboardItem;` (unbound)
    - Add `@requires: 'authenticated-user'` at service level
 
 2. ANNOTATIONS (srv/annotations.cds):
-   Generate COMPLETE annotations for EVERY entity including:
+   Generate COMPLETE, robust annotations for EVERY entity. This makes the app "Enterprise Ready":
 
-   a) UI.HeaderInfo — entity title/description for Object Page header:
+   a) @Capabilities — Secure APIs:
+      - Add `@Capabilities.Insertable: false` and `Updatable: false` for read-only tracking log entities.
+      - Add `@Capabilities.Deletable: false` for critical core entities.
+
+   b) UI.HeaderInfo — entity title/description for Object Page header:
       ```cds
       UI.HeaderInfo: {
           TypeName: 'Order',
@@ -63,22 +67,21 @@ STRICT RULES:
       }
       ```
 
-   b) UI.LineItem — columns for List Report table:
+   c) UI.LineItem — columns for List Report table:
       - Include 6-10 most important fields
       - Add `![@UI.Importance]: #High` for key fields
+      - MUST include status and amount/date fields if they exist.
 
-   c) UI.SelectionFields — filter bar fields (3-5 searchable fields)
+   d) UI.SelectionFields — filter bar fields (3-5 searchable fields)
 
-   d) UI.FieldGroup — grouped fields for Object Page sections
+   e) UI.FieldGroup — grouped fields for Object Page sections
 
-   e) UI.Facets — Object Page tabs/sections:
+   f) UI.Facets — Object Page tabs/sections:
       - #GeneralInfo: key business fields
       - #Details: secondary fields
       - #Admin: created/modified fields with @readonly
 
-   f) UI.DataPoint — KPI values in header (status, totals, ratings)
-
-   g) @Capabilities — CRUD restrictions for read-only entities
+   g) UI.DataPoint — KPI values in header (status, totals, ratings)
 
    h) @Common.ValueList — Value help for association/enum fields
 
@@ -199,6 +202,14 @@ async def service_exposure_agent(state: BuilderState) -> BuilderState:
 
     # Inject knowledge into prompt
     prompt = f"{knowledge}\n\n{prompt}"
+
+    # Self-Healing: Inject correction context if present
+    correction_context = state.get("correction_context")
+    if state.get("needs_correction") and state.get("correction_agent") == "service_exposure" and correction_context:
+        log_progress(state, "Applying self-healing correction context from validation agent...")
+        correction_prompt = correction_context.get("correction_prompt", "")
+        if correction_prompt:
+            prompt = f"CRITICAL CORRECTION REQUIRED:\n{correction_prompt}\n\nORIGINAL INSTRUCTIONS:\n{prompt}"
 
     log_progress(state, "Calling LLM for service definition generation...")
 

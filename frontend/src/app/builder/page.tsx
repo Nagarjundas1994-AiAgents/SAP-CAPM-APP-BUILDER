@@ -276,6 +276,7 @@ export default function BuilderPage() {
             eventSource.close();
             setAgentHistory(data.agent_history);
             setCurrentAgent(null);
+            setIsGenerating(false);
             
             // Get artifacts after completion
             getArtifacts(session.id).then(artifacts => {
@@ -1076,7 +1077,7 @@ export default function BuilderPage() {
       onPrevious={handlePrevious}
       canProceed={canProceed()}
       isGenerating={isGenerating}
-      isFullWidth={currentStep === 8}
+      isFullWidth={currentStep === 7 || currentStep === 8}
     >
       {renderStepContent()}
     </WizardLayout>
