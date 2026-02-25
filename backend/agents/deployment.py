@@ -143,6 +143,17 @@ async def deployment_agent(state: BuilderState) -> BuilderState:
         for key, (path, file_type) in file_map.items():
             content = result.get(key, "")
             if content:
+                if key == "package_json" and state.get("integrations_cd_requires"):
+                    try:
+                        pkg = json.loads(content)
+                        if "cds" not in pkg:
+                            pkg["cds"] = {}
+                        if "requires" not in pkg["cds"]:
+                            pkg["cds"]["requires"] = {}
+                        pkg["cds"]["requires"].update(state["integrations_cd_requires"])
+                        content = json.dumps(pkg, indent=2)
+                    except Exception as e:
+                        logger.warning(f"Failed to inject integrations into package.json: {e}")
                 generated_files.append({"path": path, "content": content, "file_type": file_type})
 
         log_progress(state, f"✅ Generated {len(generated_files)} deployment files.")

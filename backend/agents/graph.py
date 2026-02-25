@@ -15,12 +15,15 @@ from langgraph.graph import StateGraph, END
 from backend.agents.state import BuilderState, GenerationStatus
 from backend.agents.requirements import requirements_agent
 from backend.agents.data_modeling import data_modeling_agent
+from backend.agents.db_migration import db_migration_agent
 from backend.agents.service_exposure import service_exposure_agent
 from backend.agents.business_logic import business_logic_agent
 from backend.agents.fiori_ui import fiori_ui_agent
 from backend.agents.security import security_agent
 from backend.agents.extension import extension_agent
+from backend.agents.integration import integration_agent
 from backend.agents.deployment import deployment_agent
+from backend.agents.testing import testing_agent
 from backend.agents.validation import validation_agent
 
 logger = logging.getLogger(__name__)
@@ -83,7 +86,8 @@ def create_builder_graph() -> StateGraph:
     6. Security
     7. Extension
     8. Deployment
-    9. Validation (final) → self-heal or END
+    9. Testing (complexity-aware, may skip)
+    10. Validation (final) → self-heal or END
     """
     
     # Create the graph
@@ -92,12 +96,15 @@ def create_builder_graph() -> StateGraph:
     # Add nodes (agents)
     graph.add_node("requirements", requirements_agent)
     graph.add_node("data_modeling", data_modeling_agent)
+    graph.add_node("db_migration", db_migration_agent)
+    graph.add_node("integration", integration_agent)
     graph.add_node("service_exposure", service_exposure_agent)
     graph.add_node("business_logic", business_logic_agent)
     graph.add_node("fiori_ui", fiori_ui_agent)
     graph.add_node("security", security_agent)
     graph.add_node("extension", extension_agent)
     graph.add_node("deployment", deployment_agent)
+    graph.add_node("testing", testing_agent)
     graph.add_node("validation", validation_agent)
     
     # Set entry point
@@ -121,6 +128,19 @@ def create_builder_graph() -> StateGraph:
         should_retry_agent,
         {
             "retry": "data_modeling",
+            "continue": "db_migration",
+        }
+    )
+
+    # 2.1 DB Migration
+    graph.add_edge("db_migration", "integration")
+    
+    # 2.5 Integration (with retry loop)
+    graph.add_conditional_edges(
+        "integration",
+        should_retry_agent,
+        {
+            "retry": "integration",
             "continue": "service_exposure",
         }
     )
@@ -181,16 +201,20 @@ def create_builder_graph() -> StateGraph:
         should_retry_agent,
         {
             "retry": "deployment",
-            "continue": "validation",
+            "continue": "testing",
         }
     )
     
-    # 9. Validation → self-heal back to agent OR end
+    # 9. Testing → Validation
+    graph.add_edge("testing", "validation")
+    
+    # 10. Validation → self-heal back to agent OR end
     graph.add_conditional_edges(
         "validation",
         should_self_heal,
         {
             "data_modeling": "data_modeling",
+            "integration": "integration",
             "service_exposure": "service_exposure",
             "business_logic": "business_logic",
             "fiori_ui": "fiori_ui",
@@ -284,9 +308,9 @@ async def run_generation_workflow_streaming(initial_state: BuilderState):
     
     # Agent order for emitting agent_start events
     AGENT_ORDER = [
-        "requirements", "data_modeling", "service_exposure",
+        "requirements", "data_modeling", "db_migration", "integration", "service_exposure",
         "business_logic", "fiori_ui", "security",
-        "extension", "deployment", "validation",
+        "extension", "deployment", "testing", "validation",
     ]
     
     final_state: dict[str, Any] = {}

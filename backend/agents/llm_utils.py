@@ -98,8 +98,11 @@ async def generate_with_retry(
     """
     llm_manager = get_llm_manager()
     provider = state.get("llm_provider")
-    current_prompt = prompt
     last_error = None
+
+    # Inject complexity-level instructions into the prompt
+    complexity_instructions = get_complexity_prompt(state)
+    current_prompt = f"{complexity_instructions}\n\n{prompt}"
 
     for attempt in range(max_retries):
         try:
@@ -165,7 +168,7 @@ Start your response with {{ and end with }}.
                 await asyncio.sleep(2)
 
             if attempt < max_retries - 1:
-                current_prompt = prompt  # Reset to original prompt on exception
+                current_prompt = f"{complexity_instructions}\n\n{prompt}"  # Reset with complexity prefix
 
     logger.error(f"[{agent_name}] All {max_retries} LLM attempts failed. Last error: {last_error}")
     return None
@@ -223,6 +226,82 @@ def get_full_context(state: BuilderState) -> str:
     if handler_ctx:
         parts.append(handler_ctx)
     return "\n".join(parts)
+
+
+def get_complexity_prompt(state: BuilderState) -> str:
+    """
+    Get complexity-specific instructions to inject into agent prompts.
+    This controls the depth, richness, and enterprise-level features each agent generates.
+    """
+    level = state.get("complexity_level", "standard")
+    
+    prompts = {
+        "starter": """
+COMPLEXITY LEVEL: STARTER (Lightweight / Getting Started)
+- Generate 2-3 entities maximum with 4-6 fields each
+- Basic CRUD operations only — no custom actions
+- Simple validations (required fields, type checks)
+- No workflow state machines
+- Mock authentication only
+- Minimal annotations (@title on key fields)
+- No sample data CSV files
+- Skip CI/CD configuration
+- Single Fiori List Report app
+""",
+        "standard": """
+COMPLEXITY LEVEL: STANDARD (Production-Ready)
+- Generate 4-6 entities with 6-12 fields each
+- Include Draft support for editing scenarios
+- Input validations (format, range, required)
+- Status field with 3-5 state transitions
+- Auto-numbering for business identifiers
+- RBAC with Viewer/Editor/Admin roles
+- Rich Fiori annotations (@UI.LineItem, @UI.HeaderInfo, @UI.FieldGroup, @UI.SelectionField)
+- Generate sample data CSV files (5-8 rows per entity)
+- Include @Common.ValueList for association fields
+- Basic deployment config (mta.yaml, package.json)
+""",
+        "enterprise": """
+COMPLEXITY LEVEL: ENTERPRISE (Industry-Grade)
+- Generate 6-10 entities with 8-15 fields each including domain-specific fields
+- Full Draft workflow with complex lifecycle
+- Multi-level approval workflows (Draft→Submitted→Approved→InProcess→Completed)
+- Approval/Rejection actions with comments and history tracking
+- Advanced validations: cross-field, cross-entity, date range, business rule checks
+- Auto-numbering with company code and fiscal year (e.g., PO-2026-US-00001)
+- Audit trail fields (changedBy, changedAt, changeReason)
+- Calculated/virtual fields (totalAmount, remainingBudget, daysOverdue)
+- Cascading calculations (parent totals from child line items)
+- Side effects: @Common.SideEffects for reactive form updates
+- Rich Fiori annotations: @UI.Chart, @UI.DataPoint with criticality, @UI.PresentationVariant
+- @Capabilities annotations (InsertRestrictions, DeleteRestrictions, FilterRestrictions)
+- Multiple value helps with @Common.ValueList
+- Structured error handling with domain-specific error codes
+- Generate comprehensive sample data (8-12 rows with realistic values)
+- Full deployment config with CI/CD
+- Extension hooks for SAP Clean Core compliance
+""",
+        "full_stack": """
+COMPLEXITY LEVEL: FULL STACK (Maximum Enterprise Features)
+- Generate 8-15 entities with 10-20 fields each — think real enterprise ERP modules
+- Everything from ENTERPRISE level, PLUS:
+- Analytical annotations: @Aggregation, @Analytics.Measure for reporting views
+- Scheduled background job patterns (batch close, reminder notifications)
+- Event-driven patterns: emit domain events on critical state changes
+- Multi-service architecture: separate catalog/admin/analytics services
+- API versioning consideration in service paths
+- Feature flag entity for runtime configuration
+- Comprehensive i18n with multiple languages
+- Full test scaffolding: unit test stubs, integration test patterns
+- Docker and CI/CD pipeline configs (GitHub Actions)
+- Health check and monitoring endpoints
+- Comprehensive documentation (ARCHITECTURE.md, API.md, DEVELOPMENT.md)
+- Custom Fiori fragments and extensions
+- Data import/export actions for bulk operations
+"""
+    }
+    
+    return prompts.get(level, prompts["standard"])
 
 
 def store_generated_content(state: BuilderState, artifacts: list, key_map: dict[str, str]) -> None:

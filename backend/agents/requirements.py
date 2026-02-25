@@ -390,9 +390,14 @@ async def _generate_with_retry(
     Call LLM with retry logic and self-healing.
     If JSON parsing fails, feeds the error back to the LLM.
     """
+    from backend.agents.llm_utils import get_complexity_prompt
+    
     llm_manager = get_llm_manager()
-    current_prompt = prompt
     last_error = None
+
+    # Inject complexity-level instructions into the prompt
+    complexity_instructions = get_complexity_prompt(state)
+    current_prompt = f"{complexity_instructions}\n\n{prompt}"
 
     for attempt in range(max_retries):
         try:
@@ -444,7 +449,7 @@ Start your response with {{ and end with }}.
                 await asyncio.sleep(2)
 
             if attempt < max_retries - 1:
-                current_prompt = prompt  # Reset to original prompt
+                current_prompt = f"{complexity_instructions}\n\n{prompt}"  # Reset with complexity prefix
 
     logger.error(f"All {max_retries} LLM attempts failed. Last error: {last_error}")
     return None

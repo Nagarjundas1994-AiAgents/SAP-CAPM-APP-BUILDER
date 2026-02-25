@@ -144,9 +144,10 @@ DOMAIN-SPECIFIC PATTERNS — Analyze the entities and generate appropriate patte
    - Activity logging
 
 OUTPUT FORMAT:
-Return a JSON object with these keys:
+Return a JSON object with these keys (depending on the modular services you generate):
 {
-    "service_js": "... full srv/service.js content ...",
+    "admin_service_js": "... full srv/admin-service.js content ...",
+    "catalog_service_js": "... full srv/catalog-service.js content ...",
     "validation_js": "... srv/lib/validation.js utility ...",
     "numbering_js": "... srv/lib/numbering.js utility ..."
 }
@@ -172,7 +173,7 @@ BUSINESS RULES:
 {business_rules_json}
 
 REQUIREMENTS:
-1. srv/service.js — Complete handler file with:
+1. Modular Service Handlers (e.g., srv/admin-service.js, srv/catalog-service.js) — Complete handler files with:
    - ALL entity lifecycle handlers (before/after CREATE, READ, UPDATE, DELETE)
    - Status validation with state machine transitions
    - Input validation (email, phone, date ranges, required fields)
@@ -181,6 +182,7 @@ REQUIREMENTS:
    - Custom action implementations for business rules (not just stubs!)
    - Delete guards for referential integrity
    - Structured logging
+   - Role-based scoping/checks (e.g., checking `req.user.is('admin')`) if applicable
 
 2. srv/lib/validation.js — Reusable validators:
    - Email, phone, date range, field format validators
@@ -188,7 +190,7 @@ REQUIREMENTS:
 
 3. srv/lib/numbering.js — Sequential ID generation:
    - Year-prefixed auto-numbering utility
-   - Used by service.js
+   - Used by the modular service handlers
 
 IMPORTANT: Generate REAL business logic, not empty stubs. Every action
 defined in the service CDS must have a complete implementation.
@@ -271,16 +273,25 @@ async def business_logic_agent(state: BuilderState) -> BuilderState:
         agent_name="business_logic",
     )
 
-    if result and result.get("service_js"):
-        handler_content = result["service_js"]
-
-        if "cds" in handler_content.lower() or "module.exports" in handler_content:
-            generated_files.append({
-                "path": "srv/service.js",
-                "content": handler_content,
-                "file_type": "javascript",
-            })
-            log_progress(state, "✅ Generated service handler.")
+    if result and any(k.endswith('_service_js') or k == 'service_js' for k in result.keys()):
+        # Handle modular services or single service fallback
+        handler_keys = [k for k in result.keys() if k.endswith('_service_js') or k == 'service_js']
+        
+        valid_handlers = False
+        for key in handler_keys:
+            handler_content = result[key]
+            
+            # Use original filename if service_js, else convert admin_service_js -> admin-service.js
+            filename = 'service.js' if key == 'service_js' else key.replace('_js', '.js').replace('_', '-')
+            
+            if "cds" in handler_content.lower() or "module.exports" in handler_content:
+                generated_files.append({
+                    "path": f"srv/{filename}",
+                    "content": handler_content,
+                    "file_type": "javascript",
+                })
+                log_progress(state, f"✅ Generated service handler ({filename}).")
+                valid_handlers = True
 
             if result.get("validation_js"):
                 generated_files.append({
@@ -297,20 +308,12 @@ async def business_logic_agent(state: BuilderState) -> BuilderState:
                     "file_type": "javascript",
                 })
                 log_progress(state, "✅ Generated numbering utilities.")
-        else:
-            log_progress(state, "⚠️ Handler content looks invalid. Generating minimal handler.")
-            generated_files.append({
-                "path": "srv/service.js",
-                "content": _minimal_handler(entities, service_name),
-                "file_type": "javascript",
-            })
+        if not valid_handlers:
+            log_progress(state, "⚠️ Handler content looks invalid. Generating minimal modular handlers.")
+            generated_files.extend(_minimal_handler(entities, service_name))
     else:
-        log_progress(state, "⚠️ LLM generation failed. Generating minimal handler.")
-        generated_files.append({
-            "path": "srv/service.js",
-            "content": _minimal_handler(entities, service_name),
-            "file_type": "javascript",
-        })
+        log_progress(state, "⚠️ LLM generation failed. Generating minimal modular handlers.")
+        generated_files.extend(_minimal_handler(entities, service_name))
         errors.append({
             "agent": "business_logic",
             "code": "LLM_FAILED",
@@ -319,9 +322,9 @@ async def business_logic_agent(state: BuilderState) -> BuilderState:
             "severity": "warning",
         })
 
-    # Store inter-agent context
     store_generated_content(state, generated_files, {
-        "service.js": "generated_handler_js",
+        "admin-service.js": "generated_handler_js",
+        "service.js": "generated_handler_js" # Fallback mapping
     })
 
     # Update state — append to existing srv artifacts
@@ -348,27 +351,49 @@ async def business_logic_agent(state: BuilderState) -> BuilderState:
 # Minimal Fallback
 # =============================================================================
 
-def _minimal_handler(entities: list, service_name: str) -> str:
-    """Generate minimal valid service handler."""
-    entity_names = [e.get("name", "") for e in entities]
-    destructure = ", ".join(entity_names)
+def _minimal_handler(entities: list, service_name: str) -> list[GeneratedFile]:
+    """Generate minimal valid modular service handlers."""
+    generated_files = []
 
-    lines = [
-        "const cds = require('@sap/cds');",
-        f"const LOG = cds.log('{service_name}');",
-        "",
-        "module.exports = cds.service.impl(async function() {",
-        f"  const {{ {destructure} }} = this.entities;",
-        "",
+    # split entities into two mock services: Admin and Catalog
+    admin_entities = entities[:len(entities)//2] if len(entities) > 1 else entities
+    catalog_entities = entities[len(entities)//2:] if len(entities) > 1 else []
+
+    services = [
+        {"name": f"{service_name}Admin", "path": f"{service_name.lower().replace('service', '')}-admin-service.js", "entities": admin_entities},
+        {"name": f"{service_name}Catalog", "path": f"{service_name.lower().replace('service', '')}-catalog-service.js", "entities": catalog_entities}
     ]
 
-    for entity in entities:
-        name = entity.get("name", "")
-        lines.append(f"  // {name} handlers")
-        lines.append(f"  this.before('CREATE', {name}, (req) => {{")
-        lines.append(f"    LOG.info('Creating {name}:', req.data);")
-        lines.append(f"  }});")
-        lines.append("")
+    for svc in services:
+        if not svc["entities"]:
+            continue
 
-    lines.append("});")
-    return "\n".join(lines)
+        entity_names = [e.get("name", "") for e in svc["entities"]]
+        destructure = ", ".join(entity_names)
+
+        lines = [
+            "const cds = require('@sap/cds');",
+            f"const LOG = cds.log('{svc['name']}');",
+            "",
+            "module.exports = cds.service.impl(async function() {",
+            f"  const {{ {destructure} }} = this.entities;",
+            "",
+        ]
+
+        for entity in svc["entities"]:
+            name = entity.get("name", "")
+            lines.append(f"  // {name} handlers")
+            lines.append(f"  this.before('CREATE', {name}, (req) => {{")
+            lines.append(f"    LOG.info('Creating {name}:', req.data);")
+            lines.append(f"  }});")
+            lines.append("")
+
+        lines.append("});")
+        
+        generated_files.append({
+            "path": f"srv/{svc['path']}",
+            "content": "\n".join(lines),
+            "file_type": "javascript"
+        })
+
+    return generated_files

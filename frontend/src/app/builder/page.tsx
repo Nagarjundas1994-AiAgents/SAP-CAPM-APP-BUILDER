@@ -45,6 +45,10 @@ import {
   Layout,
   ArrowRight,
   MessageSquare,
+  Zap,
+  Layers,
+  Crown,
+  Sparkles,
 } from 'lucide-react';
 
 // Wizard steps - now includes Plan Review
@@ -52,24 +56,29 @@ const STEPS = [
   { id: 0, name: 'Project Setup', shortName: 'Project' },
   { id: 1, name: 'Business Domain', shortName: 'Domain' },
   { id: 2, name: 'Data Model', shortName: 'Data' },
-  { id: 3, name: 'Services & APIs', shortName: 'Services' },
-  { id: 4, name: 'Fiori UI', shortName: 'UI' },
-  { id: 5, name: 'Security', shortName: 'Security' },
-  { id: 6, name: 'Review Plan', shortName: 'Plan' },
-  { id: 7, name: 'Generate', shortName: 'Generate' },
-  { id: 8, name: 'Download', shortName: 'Download' },
+  { id: 3, name: 'DB Migration', shortName: 'DB Migration' },
+  { id: 4, name: 'Integrations', shortName: 'Integrations' },
+  { id: 5, name: 'Services & APIs', shortName: 'Services' },
+  { id: 6, name: 'Fiori UI', shortName: 'UI' },
+  { id: 7, name: 'Security', shortName: 'Security' },
+  { id: 8, name: 'Review Plan', shortName: 'Plan' },
+  { id: 9, name: 'Generate', shortName: 'Generate' },
+  { id: 10, name: 'Download', shortName: 'Download' },
 ];
 
 // Agent definitions
 const AGENTS = [
   { name: 'requirements', displayName: 'Requirements Agent', description: 'Analyzing business requirements' },
   { name: 'data_modeling', displayName: 'Data Modeling Agent', description: 'Generating CDS schemas' },
+  { name: 'db_migration', displayName: 'DB Migration Agent', description: 'Handling DB migrations and MTX' },
+  { name: 'integration', displayName: 'Integration Agent', description: 'Connecting external systems' },
   { name: 'service_exposure', displayName: 'Service Agent', description: 'Creating OData services' },
   { name: 'business_logic', displayName: 'Business Logic Agent', description: 'Writing event handlers' },
   { name: 'fiori_ui', displayName: 'Fiori UI Agent', description: 'Building Fiori Elements app' },
   { name: 'security', displayName: 'Security Agent', description: 'Configuring authorization' },
   { name: 'extension', displayName: 'Extension Agent', description: 'Adding extension points' },
   { name: 'deployment', displayName: 'Deployment Agent', description: 'Creating deployment config' },
+  { name: 'testing', displayName: 'Testing Agent', description: 'Generating automated tests' },
   { name: 'validation', displayName: 'Validation Agent', description: 'Validating SAP compliance' },
 ];
 
@@ -112,12 +121,14 @@ export default function BuilderPage() {
   const [projectDescription, setProjectDescription] = useState('');
   const [selectedDomain, setSelectedDomain] = useState<string | null>(null);
   const [entities, setEntities] = useState<string[]>([]);
+  const [integrations, setIntegrations] = useState<any[]>([]);
   const [newEntity, setNewEntity] = useState('');
   const [llmProvider, setLlmProvider] = useState('openai');
   const [llmModel, setLlmModel] = useState('gpt-5.2');
   const [fioriTheme, setFioriTheme] = useState('sap_horizon');
   const [fioriMainEntity, setFioriMainEntity] = useState<string>('');
   const [authType, setAuthType] = useState('mock');
+  const [complexityLevel, setComplexityLevel] = useState('standard');
 
   // Validation
   const canProceed = () => {
@@ -128,15 +139,17 @@ export default function BuilderPage() {
         return selectedDomain !== null;
       case 2:
         return entities.length > 0;
-      case 3:
-      case 4:
+      case 3: // DB Migration
+      case 4: // Integrations
       case 5:
-        return true;
       case 6:
-        return plan !== null && plan.approved;
       case 7:
-        return !isGenerating;
+        return true;
       case 8:
+        return plan !== null && plan.approved;
+      case 9:
+        return !isGenerating;
+      case 10:
         return result !== null;
       default:
         return true;
@@ -182,7 +195,7 @@ export default function BuilderPage() {
       }
     }
 
-    if (currentStep === 5 && !plan) {
+    if (currentStep === 7 && !plan) {
       // Generate implementation plan when moving to Plan Review
       try {
         setIsLoadingPlan(true);
@@ -192,11 +205,13 @@ export default function BuilderPage() {
             configuration: {
               domain: selectedDomain,
               entities: entities.map((name) => ({ name, fields: [] })),
+              integrations: integrations,
               llm_provider: llmProvider,
               llm_model: llmModel,
               fiori_theme: fioriTheme,
               auth_type: authType,
               fiori_main_entity: entities[0] || 'Entity',
+              complexity_level: complexityLevel,
             },
           });
           const generatedPlan = await generatePlan(session.id);
@@ -210,7 +225,7 @@ export default function BuilderPage() {
       }
     }
 
-    if (currentStep === 7) {
+    if (currentStep === 9) {
       // Start generation (plan is already approved)
       await handleGenerate();
     } else if (currentStep < STEPS.length - 1) {
@@ -281,7 +296,7 @@ export default function BuilderPage() {
             // Get artifacts after completion
             getArtifacts(session.id).then(artifacts => {
               setResult(artifacts);
-              setCurrentStep(8); // Go to download step
+              setCurrentStep(10); // Go to download step
             });
           } else if (data.type === 'workflow_error' || data.type === 'error') {
             console.error('Generation failed:', data.error || data.message);
@@ -622,6 +637,53 @@ export default function BuilderPage() {
                 )}
               </select>
             </div>
+
+            {/* Complexity Level */}
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-3">
+                App Complexity Level
+              </label>
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                {[
+                  { id: 'starter', name: 'Starter', icon: Zap, entities: '2-3', desc: 'Basic CRUD, mock auth', badge: '' },
+                  { id: 'standard', name: 'Standard', icon: Layers, entities: '4-6', desc: 'Draft, validations, roles', badge: 'Recommended' },
+                  { id: 'enterprise', name: 'Enterprise', icon: Crown, entities: '6-10', desc: 'Workflows, analytics', badge: 'Popular' },
+                  { id: 'full_stack', name: 'Full Stack', icon: Sparkles, entities: '8-15', desc: 'Everything + CI/CD', badge: 'Max' },
+                ].map((level) => (
+                  <button
+                    key={level.id}
+                    onClick={() => setComplexityLevel(level.id)}
+                    className={`relative p-4 rounded-xl text-left transition-all border ${
+                      complexityLevel === level.id
+                        ? level.id === 'starter' ? 'bg-emerald-500/20 border-emerald-500 ring-1 ring-emerald-500/50'
+                          : level.id === 'standard' ? 'bg-blue-500/20 border-blue-500 ring-1 ring-blue-500/50'
+                          : level.id === 'enterprise' ? 'bg-purple-500/20 border-purple-500 ring-1 ring-purple-500/50'
+                          : 'bg-amber-500/20 border-amber-500 ring-1 ring-amber-500/50'
+                        : 'bg-white/5 border-white/10 hover:bg-white/10 hover:border-white/20'
+                    }`}
+                  >
+                    {level.badge && (
+                      <span className={`absolute -top-2 -right-2 text-[10px] px-2 py-0.5 rounded-full font-bold ${
+                        level.id === 'standard' ? 'bg-blue-500 text-white' :
+                        level.id === 'enterprise' ? 'bg-purple-500 text-white' :
+                        'bg-amber-500 text-black'
+                      }`}>{level.badge}</span>
+                    )}
+                    <level.icon className={`w-6 h-6 mb-2 ${
+                      complexityLevel === level.id
+                        ? level.id === 'starter' ? 'text-emerald-400'
+                          : level.id === 'standard' ? 'text-blue-400'
+                          : level.id === 'enterprise' ? 'text-purple-400'
+                          : 'text-amber-400'
+                        : 'text-gray-400'
+                    }`} />
+                    <div className="font-medium text-white text-sm">{level.name}</div>
+                    <div className="text-xs text-gray-500 mt-0.5">{level.entities} entities</div>
+                    <div className="text-xs text-gray-500">{level.desc}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         );
 
@@ -708,8 +770,112 @@ export default function BuilderPage() {
           </div>
         );
 
-      // Step 3: Services
+      // Step 3: DB Migration
       case 3:
+        return (
+          <div className="space-y-6">
+            <p className="text-gray-400">
+              Configure database migration and multi-tenancy settings.
+            </p>
+
+            <div className="grid md:grid-cols-2 gap-4">
+              <div className="p-6 rounded-xl bg-white/5 border border-white/10">
+                <h3 className="font-medium text-white mb-2">HANA Native Artifacts</h3>
+                <p className="text-sm text-gray-500 mb-4">
+                  Generate HANA-specific schemas, calculation views, and roles (.hdbview, .hdbrole).
+                </p>
+                <label className="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={true}
+                    disabled
+                    className="w-5 h-5 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500 focus:ring-offset-gray-900"
+                  />
+                  <span className="text-white">Enabled by DB Migration Agent</span>
+                </label>
+              </div>
+
+              <div className="p-6 rounded-xl bg-white/5 border border-white/10">
+                <h3 className="font-medium text-white mb-2">Multi-Tenancy (MTX)</h3>
+                <p className="text-sm text-gray-500 mb-4">
+                  Support SAP BTP multi-tenant database patterns and SaaS provisioning.
+                </p>
+                <label className="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={true}
+                    disabled
+                    className="w-5 h-5 rounded border-gray-600 bg-gray-800 text-blue-500 focus:ring-blue-500 focus:ring-offset-gray-900"
+                  />
+                  <span className="text-white">Enabled by DB Migration Agent</span>
+                </label>
+              </div>
+            </div>
+          </div>
+        );
+
+      // Step 4: Integrations
+      case 4:
+        return (
+          <div className="space-y-6">
+            <p className="text-gray-400">
+              Connect your application to external enterprise systems like SAP S/4HANA or SuccessFactors.
+            </p>
+
+            <div className="grid md:grid-cols-2 gap-4">
+              {[
+                { id: 's4hana_bp', name: 'S/4HANA Business Partner API', system: 'S4HANA', icon: Server, desc: 'Read/Write Business Partners from S/4HANA' },
+                { id: 's4hana_product', name: 'S/4HANA Product Master API', system: 'S4HANA', icon: Database, desc: 'Read Product data from S/4HANA' },
+                { id: 'sf_emp', name: 'SuccessFactors Employee Central', system: 'SuccessFactors', icon: Briefcase, desc: 'Read Employee profiles from SuccessFactors' },
+              ].map((template) => {
+                const isSelected = integrations.some(i => i.id === template.id);
+                return (
+                  <button
+                    key={template.id}
+                    onClick={() => {
+                      if (isSelected) {
+                        setIntegrations(integrations.filter(i => i.id !== template.id));
+                      } else {
+                        setIntegrations([...integrations, { id: template.id, name: template.name, system: template.system, endpoint: '', auth_type: 'OAuth2' }]);
+                      }
+                    }}
+                    className={`p-4 rounded-xl text-left transition-all relative overflow-hidden ${
+                      isSelected
+                        ? 'bg-blue-500/20 border-2 border-blue-500'
+                        : 'bg-white/5 border border-white/10 hover:bg-white/10'
+                    }`}
+                  >
+                    {isSelected && (
+                      <div className="absolute top-3 right-3 text-blue-400">
+                        <CheckCircle2 className="w-5 h-4" />
+                      </div>
+                    )}
+                    <template.icon className={`w-6 h-6 mb-3 ${isSelected ? 'text-blue-400' : 'text-gray-400'}`} />
+                    <h3 className="font-medium text-white text-sm">{template.name}</h3>
+                    <p className="text-xs text-gray-500 mt-1">{template.desc}</p>
+                  </button>
+                );
+              })}
+            </div>
+            
+            {integrations.length > 0 && (
+              <div className="mt-6 p-4 bg-blue-500/10 border border-blue-500/20 rounded-xl">
+                <h4 className="text-sm font-medium text-blue-400 mb-2">Selected Integrations</h4>
+                <ul className="text-sm text-gray-300 space-y-1">
+                  {integrations.map(i => (
+                    <li key={i.id} className="flex items-center gap-2">
+                      <div className="w-1.5 h-1.5 rounded-full bg-blue-400" />
+                      {i.name} ({i.system})
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        );
+
+      // Step 4: Services
+      case 4:
         return (
           <div className="space-y-6">
             <p className="text-gray-400">
@@ -740,8 +906,8 @@ export default function BuilderPage() {
           </div>
         );
 
-      // Step 4: Fiori UI
-      case 4:
+      // Step 5: Fiori UI
+      case 5:
         return (
           <div className="space-y-6">
             <p className="text-gray-400">
@@ -778,8 +944,8 @@ export default function BuilderPage() {
           </div>
         );
 
-      // Step 5: Security
-      case 5:
+      // Step 6: Security
+      case 6:
         return (
           <div className="space-y-6">
             <p className="text-gray-400">
@@ -817,8 +983,8 @@ export default function BuilderPage() {
           </div>
         );
 
-      // Step 6: Plan Review
-      case 6:
+      // Step 7: Plan Review
+      case 7:
         return (
           <div className="space-y-6">
             {isLoadingPlan ? (
@@ -842,8 +1008,8 @@ export default function BuilderPage() {
           </div>
         );
 
-      // Step 7: Generate
-      case 7:
+      // Step 8: Generate
+      case 8:
         return (
           <div className="space-y-6">
             {isGenerating ? (
@@ -909,8 +1075,8 @@ export default function BuilderPage() {
           </div>
         );
 
-      // Step 8: Download & Modify
-      case 8:
+      // Step 9: Download & Modify
+      case 9:
         return (
           <div className="space-y-6">
             <div className="text-center py-6">

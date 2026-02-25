@@ -193,8 +193,9 @@ async def stream_generation(
     )
     initial_state.update(session.configuration or {})
     
-    # 🚨 ALWAYS USE OPENAI FOR STREAMING TO PREVENT GEMINI JSON PARSING CRASHES 🚨
-    initial_state["llm_provider"] = "openai"
+    # If using gemini, it might encounter JSON parsing issues with streaming, 
+    # but we should still respect the user's choice rather than forcing openai and failing.
+    # We will rely on self-healing retries for any JSON structural issues.
 
     async def event_generator():
         yield f"data: {json.dumps({'type': 'connected', 'session_id': session_id})}\n\n"

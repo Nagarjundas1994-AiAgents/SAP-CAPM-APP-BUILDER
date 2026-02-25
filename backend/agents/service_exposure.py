@@ -42,20 +42,24 @@ STRICT RULES:
 
 1. SERVICE DEFINITION (srv/service.cds):
    - Import schema: `using { namespace as db } from '../db/schema';`
-   - Declare: `service ServiceName @(path: '/endpoint') { ... }`
+   - Create MODULAR services instead of one monolith. Group entities logically (e.g., `CatalogService` for public/read-heavy, `AdminService` for management, `ReportingService` for analytics).
+   - Declare: `service AdminService @(path: '/admin') { ... }`
    - Use projections: `entity X as projection on db.X;`
    - Add `@odata.draft.enabled` for ALL root/header entities (NOT child/composition entities) to support Fiori Elements edit flows.
    - Define custom actions for every business rule:
      - `action approve() returns Boolean;` (bound to entity)
      - `function getDashboard() returns array of DashboardItem;` (unbound)
-   - Add `@requires: 'authenticated-user'` at service level
+   - Add `@requires: 'authenticated-user'` or specific roles (e.g., `@requires: 'admin'`) at service level
 
 2. ANNOTATIONS (srv/annotations.cds):
    Generate COMPLETE, robust annotations for EVERY entity. This makes the app "Enterprise Ready":
 
    a) @Capabilities — Secure APIs:
-      - Add `@Capabilities.Insertable: false` and `Updatable: false` for read-only tracking log entities.
-      - Add `@Capabilities.Deletable: false` for critical core entities.
+      - `@Capabilities.InsertRestrictions.Insertable: false` for log/history entities
+      - `@Capabilities.UpdateRestrictions.Updatable: false` for read-only entities
+      - `@Capabilities.DeleteRestrictions.Deletable: false` for critical core entities
+      - `@Capabilities.FilterRestrictions.FilterExpressionRestrictions` for complex fields
+      - `@Capabilities.SortRestrictions` if sorting should be limited
 
    b) UI.HeaderInfo — entity title/description for Object Page header:
       ```cds
@@ -63,29 +67,119 @@ STRICT RULES:
           TypeName: 'Order',
           TypeNamePlural: 'Orders',
           Title: { Value: orderNumber },
-          Description: { Value: status }
+          Description: { Value: status },
+          ImageUrl: iconUrl,
+          TypeImageUrl: 'sap-icon://sales-order'
       }
       ```
 
    c) UI.LineItem — columns for List Report table:
       - Include 6-10 most important fields
       - Add `![@UI.Importance]: #High` for key fields
-      - MUST include status and amount/date fields if they exist.
+      - MUST include status and amount/date fields if they exist
+      - Add `Criticality: statusCriticality` for status columns (color coding)
+      - Add `@UI.Hidden` for internal/technical fields
 
    d) UI.SelectionFields — filter bar fields (3-5 searchable fields)
 
-   e) UI.FieldGroup — grouped fields for Object Page sections
-
-   f) UI.Facets — Object Page tabs/sections:
+   e) UI.FieldGroup — grouped fields for Object Page sections:
       - #GeneralInfo: key business fields
-      - #Details: secondary fields
+      - #Details: secondary fields  
+      - #Amounts: financial/quantity fields grouped together
+      - #Dates: date fields together
       - #Admin: created/modified fields with @readonly
 
-   g) UI.DataPoint — KPI values in header (status, totals, ratings)
+   f) UI.Facets — Object Page tabs/sections using ReferenceFacet:
+      - Use `$Type: 'UI.CollectionFacet'` to group related sections
+      - Include composition child entities as table facets
+      ```cds
+      UI.Facets: [
+        { $Type: 'UI.CollectionFacet', Label: 'General', Facets: [
+          { $Type: 'UI.ReferenceFacet', Target: '@UI.FieldGroup#GeneralInfo', Label: 'Overview' },
+          { $Type: 'UI.ReferenceFacet', Target: '@UI.FieldGroup#Amounts', Label: 'Financials' },
+        ]},
+        { $Type: 'UI.ReferenceFacet', Target: 'items/@UI.LineItem', Label: 'Line Items' },
+        { $Type: 'UI.ReferenceFacet', Target: '@UI.FieldGroup#Admin', Label: 'Admin' }
+      ]
+      ```
 
-   h) @Common.ValueList — Value help for association/enum fields
+   g) UI.DataPoint — KPI values in Object Page header:
+      ```cds
+      UI.DataPoint#Status: {
+        Value: status,
+        Title: 'Status',
+        Criticality: statusCriticality
+      },
+      UI.DataPoint#TotalAmount: {
+        Value: totalAmount,
+        Title: 'Total Amount',
+        ValueFormat: { ScaleFactor: 1, NumberOfFractionalDigits: 2 }
+      }
+      ```
 
-   i) @Common.SideEffects — reactive form updates
+   h) UI.HeaderFacets — data points shown in Object Page header bar:
+      ```cds
+      UI.HeaderFacets: [
+        { $Type: 'UI.ReferenceFacet', Target: '@UI.DataPoint#Status' },
+        { $Type: 'UI.ReferenceFacet', Target: '@UI.DataPoint#TotalAmount' }
+      ]
+      ```
+
+   i) StatusCriticality — Color-coded status indicators (CRITICAL for enterprise apps):
+      Generate a virtual field `statusCriticality` with:
+      - 0 = Neutral (gray) — Draft, New
+      - 1 = Negative (red) — Rejected, Cancelled, Overdue
+      - 2 = Critical (orange) — Pending, OnHold, Warning
+      - 3 = Positive (green) — Approved, Completed, Active
+
+   j) @Common.ValueList — Value help for association/enum fields:
+      ```cds
+      category @Common.ValueList: {
+        CollectionPath: 'Categories',
+        Parameters: [
+          { $Type: 'Common.ValueListParameterInOut', LocalDataProperty: category_ID, ValueListProperty: 'ID' },
+          { $Type: 'Common.ValueListParameterDisplayOnly', ValueListProperty: 'name' }
+        ]
+      }
+      ```
+
+   k) @Common.SideEffects — Reactive form updates:
+      ```cds
+      @Common.SideEffects: {
+        SourceProperties: [quantity, unitPrice],
+        TargetProperties: [totalAmount]
+      }
+      ```
+
+   l) UI.PresentationVariant — Default sort/group for List Report:
+      ```cds
+      UI.PresentationVariant: {
+        SortOrder: [{ Property: createdAt, Descending: true }],
+        Visualizations: ['@UI.LineItem']
+      }
+      ```
+
+   m) UI.SelectionVariant — Pre-defined filter presets:
+      ```cds
+      UI.SelectionVariant#Active: {
+        Text: 'Active Items',
+        SelectOptions: [{ PropertyName: status, Ranges: [{ Sign: #I, Option: #EQ, Low: 'Active' }] }]
+      }
+      ```
+
+   n) UI.Chart (for ENTERPRISE+ complexity) — Analytical charts:
+      ```cds
+      UI.Chart: {
+        Title: 'Orders by Status',
+        ChartType: #Donut,
+        Dimensions: [status],
+        Measures: [totalAmount],
+        MeasureAttributes: [{ Measure: totalAmount, Role: #Axis1 }]
+      }
+      ```
+
+   o) UI.ConnectedFields — Grouped field display (e.g., address):
+      Use FieldGroup with related fields grouped under meaningful labels.
 
 OUTPUT FORMAT:
 Return a JSON object:
@@ -119,10 +213,11 @@ BUSINESS RULES:
 REQUIREMENTS:
 1. srv/service.cds:
    - Import from '../db/schema'
-   - Create projections for ALL entities
+   - Create MODULAR services (e.g., CatalogService, AdminService) instead of one monolith
+   - Group entities logically across these services
    - Enable @odata.draft.enabled on root entities only
    - Define custom actions/functions for business rules
-   - Add service-level auth annotation
+   - Add service-level auth annotations based on the service's purpose
 
 2. srv/annotations.cds:
    - COMPLETE UI annotations for EVERY entity
@@ -306,46 +401,74 @@ def _minimal_service_files(
     relationships: list,
     draft_enabled: bool,
 ) -> list[GeneratedFile]:
-    """Generate minimal valid service files."""
-    # Service CDS
-    lines = [
-        f"using {{ {namespace} as db }} from '../db/schema';",
-        "",
-        f"service {service_name} @(path: '/{service_path}') {{",
+    """Generate minimal valid modular service files."""
+    generated_files = []
+
+    # split entities into two mock services: Admin and Catalog
+    admin_entities = entities[:len(entities)//2] if len(entities) > 1 else entities
+    catalog_entities = entities[len(entities)//2:] if len(entities) > 1 else []
+
+    services = [
+        {"name": f"{service_name}Admin", "path": f"{service_path}-admin", "entities": admin_entities},
+        {"name": f"{service_name}Catalog", "path": f"{service_path}-catalog", "entities": catalog_entities}
     ]
-    for entity in entities:
-        name = entity.get("name", "")
-        is_child = _is_child_entity(name, relationships)
-        draft_ann = " @odata.draft.enabled" if draft_enabled and not is_child else ""
-        lines.append(f"  entity {name} as projection on db.{name}{draft_ann};")
-    lines.append("}")
 
-    service_content = "\n".join(lines)
+    for svc in services:
+        if not svc["entities"]:
+            continue
 
-    # Minimal annotations
-    ann_lines = [f"using {service_name} from './service';", ""]
-    for entity in entities:
-        name = entity.get("name", "")
-        fields = entity.get("fields", [])
-        field_names = [f.get("name", "") for f in fields if f.get("name") != "ID"][:6]
+        # Service CDS
+        lines = [
+            f"using {{ {namespace} as db }} from '../db/schema';",
+            "",
+            f"service {svc['name']} @(path: '/{svc['path']}') {{",
+        ]
+        for entity in svc["entities"]:
+            name = entity.get("name", "")
+            is_child = _is_child_entity(name, relationships)
+            draft_ann = " @odata.draft.enabled" if draft_enabled and not is_child else ""
+            lines.append(f"  entity {name} as projection on db.{name}{draft_ann};")
+        lines.append("}")
 
-        ann_lines.append(f"annotate {service_name}.{name} with @(")
-        ann_lines.append(f"  UI.HeaderInfo: {{")
-        ann_lines.append(f"    TypeName: '{name}',")
-        ann_lines.append(f"    TypeNamePlural: '{name}s',")
-        if field_names:
-            ann_lines.append(f"    Title: {{ Value: {field_names[0]} }}")
-        ann_lines.append(f"  }},")
-        ann_lines.append(f"  UI.LineItem: [")
-        for fn in field_names[:5]:
-            ann_lines.append(f"    {{ Value: {fn} }},")
-        ann_lines.append(f"  ]")
-        ann_lines.append(f");")
-        ann_lines.append("")
+        service_content = "\n".join(lines)
 
-    annotations_content = "\n".join(ann_lines)
+        # Minimal annotations
+        ann_lines = [f"using {svc['name']} from './service';", ""]
+        for entity in svc["entities"]:
+            name = entity.get("name", "")
+            fields = entity.get("fields", [])
+            field_names = [f.get("name", "") for f in fields if f.get("name") != "ID"][:6]
 
-    return [
-        {"path": "srv/service.cds", "content": service_content, "file_type": "cds"},
-        {"path": "srv/annotations.cds", "content": annotations_content, "file_type": "cds"},
-    ]
+            ann_lines.append(f"annotate {svc['name']}.{name} with @(")
+            ann_lines.append(f"  UI.HeaderInfo: {{")
+            ann_lines.append(f"    TypeName: '{name}',")
+            ann_lines.append(f"    TypeNamePlural: '{name}s',")
+            if field_names:
+                ann_lines.append(f"    Title: {{ Value: {field_names[0]} }}")
+            ann_lines.append(f"  }},")
+            ann_lines.append(f"  UI.LineItem: [")
+            for fn in field_names[:5]:
+                ann_lines.append(f"    {{ Value: {fn} }},")
+            ann_lines.append(f"  ]")
+            ann_lines.append(f");")
+            ann_lines.append("")
+
+        annotations_content = "\n".join(ann_lines)
+
+        generated_files.append({"path": f"srv/{svc['name'].lower()}-service.cds", "content": service_content, "file_type": "cds"})
+        generated_files.append({"path": f"srv/{svc['name'].lower()}-annotations.cds", "content": annotations_content, "file_type": "cds"})
+
+    # add a unified index file
+    index_lines = []
+    for svc in services:
+        if svc["entities"]:
+            index_lines.append(f"using from './{svc['name'].lower()}-service';")
+            index_lines.append(f"using from './{svc['name'].lower()}-annotations';")
+            
+    generated_files.append({
+        "path": "srv/index.cds", 
+        "content": "\n".join(index_lines) + "\n", 
+        "file_type": "cds"
+    })
+    
+    return generated_files

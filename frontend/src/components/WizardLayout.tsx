@@ -85,7 +85,7 @@ export default function WizardLayout({
             Step {currentStep + 1} of {steps.length}
           </div>
           <h1 className="text-2xl font-bold text-white">
-            {steps[currentStep].name}
+            {steps[currentStep]?.name || 'Finished'}
           </h1>
         </div>
 

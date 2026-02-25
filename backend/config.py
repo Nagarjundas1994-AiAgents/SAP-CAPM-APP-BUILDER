@@ -57,13 +57,13 @@ class Settings(BaseSettings):
     
     # Default provider
     default_llm_provider: Literal["openai", "gemini", "deepseek", "kimi"] = "openai"
-    default_llm_model: str = "gpt-4-turbo-preview"
+    default_llm_model: str = "gpt-4o-mini"
     
     # Model mappings per provider
     @property
     def llm_models(self) -> dict[str, str]:
         return {
-            "openai": self.default_llm_model if self.default_llm_provider == "openai" else "gpt-4-turbo-preview",
+            "openai": self.default_llm_model if self.default_llm_provider == "openai" else "gpt-4o-mini",
             "gemini": "gemini-1.5-pro",
             "deepseek": "deepseek-chat",
             "kimi": "moonshot-v1-128k",

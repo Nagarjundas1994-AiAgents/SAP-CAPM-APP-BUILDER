@@ -93,6 +93,14 @@ class GenerationStatus(str, Enum):
     FAILED = "failed"
 
 
+class ComplexityLevel(str, Enum):
+    """Application complexity level — controls generation depth."""
+    STARTER = "starter"          # 2-3 entities, basic CRUD, mock auth
+    STANDARD = "standard"        # 4-6 entities, draft, validations, roles
+    ENTERPRISE = "enterprise"    # 6-10 entities, workflows, integrations, analytics, multi-app
+    FULL_STACK = "full_stack"    # 8-15 entities, everything + testing + CI/CD + monitoring
+
+
 # =============================================================================
 # Component Type Definitions
 # =============================================================================
@@ -145,6 +153,15 @@ class RoleDefinition(TypedDict, total=False):
     name: str
     description: str | None
     scopes: list[str]
+
+
+class IntegrationDefinition(TypedDict, total=False):
+    """External service integration definition."""
+    name: str
+    system: Literal["S4HANA", "SuccessFactors", "Ariba", "Custom REST", "Custom OData"]
+    description: str | None
+    endpoint: str | None
+    auth_type: Literal["Basic", "OAuth2", "PrincipalPropagation", "None"]
 
 
 class RestrictionDefinition(TypedDict, total=False):
@@ -213,6 +230,7 @@ class BuilderState(TypedDict, total=False):
     entities: list[EntityDefinition]
     relationships: list[RelationshipDefinition]
     business_rules: list[BusinessRule]
+    integrations: list[IntegrationDefinition]
     
     # -------------------------------------------------------------------------
     # CAP Configuration
@@ -247,6 +265,11 @@ class BuilderState(TypedDict, total=False):
     ci_cd_enabled: bool
     ci_cd_platform: str | None  # CICDPlatform value
     docker_enabled: bool
+    
+    # -------------------------------------------------------------------------
+    # Complexity Level
+    # -------------------------------------------------------------------------
+    complexity_level: str  # ComplexityLevel value — controls generation depth
     
     # -------------------------------------------------------------------------
     # Agent Execution State
@@ -334,6 +357,7 @@ def create_initial_state(
         entities=[],
         relationships=[],
         business_rules=[],
+        integrations=[],
         
         # CAP
         cap_runtime=CAPRuntime.NODEJS.value,
@@ -360,6 +384,9 @@ def create_initial_state(
         ci_cd_enabled=False,
         ci_cd_platform=None,
         docker_enabled=False,
+        
+        # Complexity
+        complexity_level=ComplexityLevel.STANDARD.value,
         
         # Execution
         current_agent="",
