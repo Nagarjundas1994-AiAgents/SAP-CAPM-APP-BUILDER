@@ -576,7 +576,7 @@ export default function BuilderPage() {
                   // Reset model when provider changes
                   const defaultModels: Record<string, string> = {
                     openai: 'gpt-5.2',
-                    gemini: 'gemini-3-pro',
+                    gemini: 'gemini-1.5-pro',
                     deepseek: 'deepseek-chat',
                     kimi: 'kimi-k2.5'
                   };
@@ -611,14 +611,9 @@ export default function BuilderPage() {
                 )}
                 {llmProvider === 'gemini' && (
                   <>
-                    <option value="gemini-3-pro" className="bg-gray-900 text-white">Gemini 3 Pro (Latest - Recommended)</option>
-                    <option value="gemini-3-flash" className="bg-gray-900 text-white">Gemini 3 Flash (Faster)</option>
-                    <option value="gemini-3-deep-think" className="bg-gray-900 text-white">Gemini 3 Deep Think (Best Reasoning)</option>
-                    <option value="gemini-2.5-pro" className="bg-gray-900 text-white">Gemini 2.5 Pro</option>
-                    <option value="gemini-2.5-pro" className="bg-gray-900 text-white">Gemini 2.5 Pro (Recommended)</option>
-                    <option value="gemini-2.5-flash" className="bg-gray-900 text-white">Gemini 2.5 Flash (Faster)</option>
+                    <option value="gemini-1.5-pro" className="bg-gray-900 text-white">Gemini 1.5 Pro (Latest - Recommended)</option>
+                    <option value="gemini-1.5-flash" className="bg-gray-900 text-white">Gemini 1.5 Flash (Faster)</option>
                     <option value="gemini-2.0-flash" className="bg-gray-900 text-white">Gemini 2.0 Flash</option>
-                    
                   </>
                 )}
                 {llmProvider === 'deepseek' && (
@@ -1051,7 +1046,7 @@ export default function BuilderPage() {
                     <div className="text-sm text-gray-400">Entities</div>
                   </div>
                   <div className="p-4 bg-white/5 rounded-xl text-center border border-white/5">
-                    <div className="text-2xl font-bold text-white">9</div>
+                    <div className="text-2xl font-bold text-white">{AGENTS.length}</div>
                     <div className="text-sm text-gray-400">AI Agents</div>
                   </div>
                   <div className="p-4 bg-white/5 rounded-xl text-center border border-white/5">

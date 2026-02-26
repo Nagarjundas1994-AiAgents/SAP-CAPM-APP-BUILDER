@@ -121,7 +121,11 @@ async def generate_plan(
     config = session.configuration or {}
     initial_state.update(config)
     
-    logger.info(f"Generating plan for session {session_id} with {len(initial_state.get('entities', []))} initial entities")
+    # Ensure LLM provider and model are explicitly set from config
+    initial_state["llm_provider"] = config.get("llm_provider", "deepseek")
+    initial_state["llm_model"] = config.get("llm_model")
+    
+    logger.info(f"Generating plan for session {session_id} with {len(initial_state.get('entities', []))} initial entities, provider={initial_state.get('llm_provider')}")
     
     try:
         # Run only the requirements agent to generate the plan
