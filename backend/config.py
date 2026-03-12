@@ -54,9 +54,11 @@ class Settings(BaseSettings):
     google_api_key: str | None = None
     deepseek_api_key: str | None = None
     kimi_api_key: str | None = None
+    xai_api_key: str | None = None
+    openrouter_api_key: str | None = None
     
     # Default provider
-    default_llm_provider: Literal["openai", "gemini", "deepseek", "kimi"] = "openai"
+    default_llm_provider: Literal["openai", "gemini", "deepseek", "kimi", "xai", "openrouter"] = "openai"
     default_llm_model: str = "gpt-4o-mini"
     
     # Model mappings per provider
@@ -67,6 +69,8 @@ class Settings(BaseSettings):
             "gemini": "gemini-1.5-pro",
             "deepseek": "deepseek-chat",
             "kimi": "moonshot-v1-128k",
+            "xai": "grok-4.20-beta-0309-reasoning",
+            "openrouter": "openai/gpt-4.1",
         }
     
     def get_api_key(self, provider: str) -> str | None:
@@ -76,6 +80,8 @@ class Settings(BaseSettings):
             "gemini": self.google_api_key,
             "deepseek": self.deepseek_api_key,
             "kimi": self.kimi_api_key,
+            "xai": self.xai_api_key,
+            "openrouter": self.openrouter_api_key,
         }
         return key_map.get(provider)
     
@@ -91,6 +97,10 @@ class Settings(BaseSettings):
             providers.append("deepseek")
         if self.kimi_api_key:
             providers.append("kimi")
+        if self.xai_api_key:
+            providers.append("xai")
+        if self.openrouter_api_key:
+            providers.append("openrouter")
         return providers
     
     # ==========================================================================

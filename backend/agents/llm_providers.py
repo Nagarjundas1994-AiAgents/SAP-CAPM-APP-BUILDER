@@ -1,6 +1,7 @@
 """
-Multi-LLM Provider Abstraction Layer
-Supports OpenAI GPT-4, Google Gemini, DeepSeek, and Kimi K2.5
+Multi-LLM Provider Abstraction Layer.
+
+Supports OpenAI-compatible and native providers used by the builder.
 """
 
 import logging
@@ -158,6 +159,68 @@ class KimiProvider(LLMProvider):
         return str(response.content)
 
 
+class XAIProvider(LLMProvider):
+    """xAI Grok provider (OpenAI-compatible API)."""
+
+    @property
+    def name(self) -> str:
+        return "xai"
+
+    def __init__(self, api_key: str, model: str = "grok-4.20-beta-0309-reasoning"):
+        self.api_key = api_key
+        self.model = model
+        self.base_url = "https://api.x.ai/v1"
+
+    def get_chat_model(self, **kwargs) -> BaseChatModel:
+        temperature = kwargs.pop("temperature", 0.1)
+        return ChatOpenAI(
+            api_key=self.api_key,
+            model=self.model,
+            base_url=self.base_url,
+            temperature=temperature,
+            **kwargs,
+        )
+
+    async def generate(self, messages: list[BaseMessage], **kwargs) -> str:
+        model = self.get_chat_model(**kwargs)
+        logger.info(f"LLM Generation: provider={self.name}, model={self.model}")
+        response = await model.ainvoke(messages)
+        return str(response.content)
+
+
+class OpenRouterProvider(LLMProvider):
+    """OpenRouter provider (OpenAI-compatible API)."""
+
+    @property
+    def name(self) -> str:
+        return "openrouter"
+
+    def __init__(self, api_key: str, model: str = "openai/gpt-4.1"):
+        self.api_key = api_key
+        self.model = model
+        self.base_url = "https://openrouter.ai/api/v1"
+
+    def get_chat_model(self, **kwargs) -> BaseChatModel:
+        temperature = kwargs.pop("temperature", 0.1)
+        return ChatOpenAI(
+            api_key=self.api_key,
+            model=self.model,
+            base_url=self.base_url,
+            temperature=temperature,
+            default_headers={
+                "HTTP-Referer": "http://localhost:3000",
+                "X-Title": "SAP App Builder",
+            },
+            **kwargs,
+        )
+
+    async def generate(self, messages: list[BaseMessage], **kwargs) -> str:
+        model = self.get_chat_model(**kwargs)
+        logger.info(f"LLM Generation: provider={self.name}, model={self.model}")
+        response = await model.ainvoke(messages)
+        return str(response.content)
+
+
 class LLMManager:
     """
     Central manager for LLM providers.
@@ -198,6 +261,20 @@ class LLMManager:
                 model=self.settings.llm_models["kimi"],
             )
             logger.info("Kimi provider initialized")
+
+        if self.settings.xai_api_key:
+            self._providers["xai"] = XAIProvider(
+                api_key=self.settings.xai_api_key,
+                model=self.settings.llm_models["xai"],
+            )
+            logger.info("xAI provider initialized")
+
+        if self.settings.openrouter_api_key:
+            self._providers["openrouter"] = OpenRouterProvider(
+                api_key=self.settings.openrouter_api_key,
+                model=self.settings.llm_models["openrouter"],
+            )
+            logger.info("OpenRouter provider initialized")
     
     @property
     def available_providers(self) -> list[str]:

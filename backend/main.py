@@ -19,7 +19,8 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request, Response
+import httpx
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -161,15 +162,40 @@ async def health_check():
 @app.get("/api/config")
 async def get_config():
     """Get public configuration."""
-    from backend.agents.llm_providers import get_llm_manager
-    
-    llm_manager = get_llm_manager()
-    
+    from backend.model_catalog import get_supported_providers
+
     return {
         "app_name": settings.app_name,
         "environment": settings.app_env,
-        "available_providers": llm_manager.available_providers,
+        "available_providers": settings.available_providers,
+        "supported_providers": get_supported_providers(settings),
         "default_provider": settings.default_llm_provider,
+    }
+
+
+@app.get("/api/config/models")
+async def get_config_models(
+    provider: str = Query(..., description="LLM provider identifier"),
+):
+    """Get model options for a specific provider."""
+    from backend.model_catalog import get_provider_models
+
+    try:
+        source, models = await get_provider_models(provider, settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not fetch the live model catalog for provider '{provider}'",
+        ) from exc
+
+    return {
+        "provider": provider,
+        "configured": provider in settings.available_providers,
+        "source": source,
+        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "models": models,
     }
 
 

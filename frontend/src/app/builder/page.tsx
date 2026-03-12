@@ -22,11 +22,15 @@ import {
   sendChatPrompt,
   getChatHistory,
   getRegenerateStreamUrl,
+  getConfig,
+  getProviderModels,
   Session,
   GenerationResult,
   AgentExecution,
   ImplementationPlan,
   ValidationError,
+  ProviderSummary,
+  ModelOption,
 } from '@/lib/api';
 import {
   Briefcase,
@@ -96,6 +100,72 @@ const DOMAIN_TEMPLATES = [
   { id: 'custom', name: 'Custom Domain', icon: Puzzle, entities: [] },
 ];
 
+const createFallbackModel = (
+  id: string,
+  label: string,
+  pricingType: 'free' | 'paid' | 'unknown' = 'paid',
+  recommended = false,
+): ModelOption => ({
+  id,
+  name: label.replace(/\s+\(.+\)$/, ''),
+  label,
+  pricing_type: pricingType,
+  price_summary: null,
+  created_at: null,
+  context_length: null,
+  description: null,
+  source: 'static',
+  recommended,
+});
+
+const FALLBACK_PROVIDER_OPTIONS: ProviderSummary[] = [
+  { id: 'openai', label: 'OpenAI', configured: false, default_model: 'gpt-5.2', catalog_type: 'static' },
+  { id: 'gemini', label: 'Google Gemini', configured: false, default_model: 'gemini-1.5-pro', catalog_type: 'static' },
+  { id: 'deepseek', label: 'DeepSeek', configured: false, default_model: 'deepseek-chat', catalog_type: 'static' },
+  { id: 'kimi', label: 'Kimi (Moonshot)', configured: false, default_model: 'kimi-k2.5', catalog_type: 'static' },
+  { id: 'xai', label: 'xAI', configured: false, default_model: 'grok-4.20-beta-0309-reasoning', catalog_type: 'live' },
+  { id: 'openrouter', label: 'OpenRouter', configured: false, default_model: null, catalog_type: 'live' },
+];
+
+const FALLBACK_MODEL_CATALOG: Record<string, ModelOption[]> = {
+  openai: [
+    createFallbackModel('gpt-5.2', 'GPT-5.2 (Latest - Recommended)', 'paid', true),
+    createFallbackModel('gpt-5.3-codex', 'GPT-5.3 Codex (Best for Code)'),
+    createFallbackModel('gpt-4o', 'GPT-4o'),
+    createFallbackModel('o3', 'o3 (Best Reasoning)'),
+    createFallbackModel('o3-mini', 'o3 Mini (Faster)'),
+  ],
+  gemini: [
+    createFallbackModel('gemini-1.5-pro', 'Gemini 1.5 Pro (Latest - Recommended)', 'paid', true),
+    createFallbackModel('gemini-1.5-flash', 'Gemini 1.5 Flash (Faster)'),
+    createFallbackModel('gemini-2.0-flash', 'Gemini 2.0 Flash'),
+  ],
+  deepseek: [
+    createFallbackModel('deepseek-chat', 'DeepSeek V3.2 Chat (Recommended)', 'paid', true),
+    createFallbackModel('deepseek-reasoner', 'DeepSeek R1 (Best Reasoning)'),
+    createFallbackModel('deepseek-coder', 'DeepSeek Coder V2'),
+  ],
+  kimi: [
+    createFallbackModel('kimi-k2.5', 'Kimi K2.5 (Latest - Recommended)', 'paid', true),
+    createFallbackModel('kimi-k2.5-thinking', 'Kimi K2.5 Thinking (Reasoning)'),
+    createFallbackModel('kimi-k2', 'Kimi K2'),
+  ],
+  xai: [
+    createFallbackModel('grok-4.20-multi-agent-beta-0309', 'Grok 4.20 Multi-Agent Beta 0309 (Paid)', 'paid', true),
+    createFallbackModel('grok-4.20-beta-0309-reasoning', 'Grok 4.20 Beta 0309 Reasoning (Paid)'),
+    createFallbackModel('grok-4.20-beta-0309-non-reasoning', 'Grok 4.20 Beta 0309 Non-Reasoning (Paid)'),
+    createFallbackModel('grok-4-1-fast-reasoning', 'Grok 4.1 Fast Reasoning (Paid)'),
+    createFallbackModel('grok-4-1-fast-non-reasoning', 'Grok 4.1 Fast Non-Reasoning (Paid)'),
+    createFallbackModel('grok-code-fast-1', 'Grok Code Fast 1 (Paid)'),
+    createFallbackModel('grok-4-0709', 'Grok 4 0709 (Paid)'),
+    createFallbackModel('grok-3', 'Grok 3 (Paid)'),
+    createFallbackModel('grok-3-mini', 'Grok 3 Mini (Paid)'),
+    createFallbackModel('grok-4-fast-reasoning', 'Grok 4 Fast Reasoning (Paid)'),
+    createFallbackModel('grok-4-fast-non-reasoning', 'Grok 4 Fast Non-Reasoning (Paid)'),
+  ],
+  openrouter: [],
+};
+
 export default function BuilderPage() {
   const router = useRouter();
   const [currentStep, setCurrentStep] = useState(0);
@@ -128,10 +198,95 @@ export default function BuilderPage() {
   const [newEntity, setNewEntity] = useState('');
   const [llmProvider, setLlmProvider] = useState('openai');
   const [llmModel, setLlmModel] = useState('gpt-5.2');
+  const [providerOptions, setProviderOptions] = useState<ProviderSummary[]>(FALLBACK_PROVIDER_OPTIONS);
+  const [modelCatalog, setModelCatalog] = useState<Record<string, ModelOption[]>>(FALLBACK_MODEL_CATALOG);
+  const [loadedModelProviders, setLoadedModelProviders] = useState<Record<string, boolean>>({});
+  const [isLoadingModelCatalog, setIsLoadingModelCatalog] = useState(false);
   const [fioriTheme, setFioriTheme] = useState('sap_horizon');
   const [fioriMainEntity, setFioriMainEntity] = useState<string>('');
   const [authType, setAuthType] = useState('mock');
   const [complexityLevel, setComplexityLevel] = useState('standard');
+
+  const selectedProvider = providerOptions.find((provider) => provider.id === llmProvider)
+    ?? FALLBACK_PROVIDER_OPTIONS.find((provider) => provider.id === llmProvider)
+    ?? FALLBACK_PROVIDER_OPTIONS[0];
+  const availableModels = modelCatalog[llmProvider] ?? [];
+  const freeModelCount = availableModels.filter((model) => model.pricing_type === 'free').length;
+  const paidModelCount = availableModels.filter((model) => model.pricing_type === 'paid').length;
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadConfig = async () => {
+      try {
+        const config = await getConfig();
+        if (!isMounted || config.supported_providers.length === 0) return;
+
+        setProviderOptions(config.supported_providers);
+      } catch (error) {
+        console.error('Failed to load provider configuration:', error);
+      }
+    };
+
+    void loadConfig();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (loadedModelProviders[llmProvider]) {
+      return;
+    }
+
+    let isMounted = true;
+
+    const loadModels = async () => {
+      setIsLoadingModelCatalog(true);
+      try {
+        const response = await getProviderModels(llmProvider);
+        if (!isMounted) return;
+
+        if (response.models.length > 0) {
+          setModelCatalog((prev) => ({
+            ...prev,
+            [llmProvider]: response.models,
+          }));
+        }
+      } catch (error) {
+        console.error(`Failed to load models for ${llmProvider}:`, error);
+      } finally {
+        if (isMounted) {
+          setLoadedModelProviders((prev) => ({
+            ...prev,
+            [llmProvider]: true,
+          }));
+          setIsLoadingModelCatalog(false);
+        }
+      }
+    };
+
+    void loadModels();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [llmProvider, loadedModelProviders]);
+
+  useEffect(() => {
+    if (availableModels.length === 0) {
+      return;
+    }
+
+    const currentModelStillAvailable = availableModels.some((model) => model.id === llmModel);
+    if (currentModelStillAvailable) {
+      return;
+    }
+
+    const recommendedModel = availableModels.find((model) => model.recommended) ?? availableModels[0];
+    setLlmModel(recommendedModel.id);
+  }, [availableModels, llmModel]);
 
   // Validation
   const canProceed = () => {
@@ -574,24 +729,20 @@ export default function BuilderPage() {
               </label>
               <select
                 value={llmProvider}
-                onChange={(e) => {
-                  setLlmProvider(e.target.value);
-                  // Reset model when provider changes
-                  const defaultModels: Record<string, string> = {
-                    openai: 'gpt-5.2',
-                    gemini: 'gemini-1.5-pro',
-                    deepseek: 'deepseek-chat',
-                    kimi: 'kimi-k2.5'
-                  };
-                  setLlmModel(defaultModels[e.target.value] || 'gpt-5.2');
-                }}
+                onChange={(e) => setLlmProvider(e.target.value)}
                 className="w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-xl text-white focus:outline-none focus:border-blue-500 transition-colors"
               >
-                <option value="openai" className="bg-gray-900 text-white">OpenAI</option>
-                <option value="gemini" className="bg-gray-900 text-white">Google Gemini</option>
-                <option value="deepseek" className="bg-gray-900 text-white">DeepSeek</option>
-                <option value="kimi" className="bg-gray-900 text-white">Kimi (Moonshot)</option>
+                {providerOptions.map((provider) => (
+                  <option key={provider.id} value={provider.id} className="bg-gray-900 text-white">
+                    {provider.label}
+                  </option>
+                ))}
               </select>
+              <p className="mt-2 text-xs text-gray-500">
+                {selectedProvider.configured
+                  ? `${selectedProvider.label} is configured and ready to use.`
+                  : `${selectedProvider.label} is visible in the builder, but you still need its API key in .env before generation can use it.`}
+              </p>
             </div>
 
             <div>
@@ -599,41 +750,30 @@ export default function BuilderPage() {
                 Model
               </label>
               <select
-                value={llmModel}
+                value={availableModels.length === 0 ? '' : llmModel}
                 onChange={(e) => setLlmModel(e.target.value)}
                 className="w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-xl text-white focus:outline-none focus:border-blue-500 transition-colors"
               >
-                {llmProvider === 'openai' && (
-                  <>
-                    <option value="gpt-5.2" className="bg-gray-900 text-white">GPT-5.2 (Latest - Recommended)</option>
-                    <option value="gpt-5.3-codex" className="bg-gray-900 text-white">GPT-5.3 Codex (Best for Code)</option>
-                    <option value="gpt-4o" className="bg-gray-900 text-white">GPT-4o</option>
-                    <option value="o3" className="bg-gray-900 text-white">o3 (Best Reasoning)</option>
-                    <option value="o3-mini" className="bg-gray-900 text-white">o3 Mini (Faster)</option>
-                  </>
+                {availableModels.length === 0 && (
+                  <option value="" className="bg-gray-900 text-white">
+                    No models available
+                  </option>
                 )}
-                {llmProvider === 'gemini' && (
-                  <>
-                    <option value="gemini-1.5-pro" className="bg-gray-900 text-white">Gemini 1.5 Pro (Latest - Recommended)</option>
-                    <option value="gemini-1.5-flash" className="bg-gray-900 text-white">Gemini 1.5 Flash (Faster)</option>
-                    <option value="gemini-2.0-flash" className="bg-gray-900 text-white">Gemini 2.0 Flash</option>
-                  </>
-                )}
-                {llmProvider === 'deepseek' && (
-                  <>
-                    <option value="deepseek-chat" className="bg-gray-900 text-white">DeepSeek V3.2 Chat (Recommended)</option>
-                    <option value="deepseek-reasoner" className="bg-gray-900 text-white">DeepSeek R1 (Best Reasoning)</option>
-                    <option value="deepseek-coder" className="bg-gray-900 text-white">DeepSeek Coder V2</option>
-                  </>
-                )}
-                {llmProvider === 'kimi' && (
-                  <>
-                    <option value="kimi-k2.5" className="bg-gray-900 text-white">Kimi K2.5 (Latest - Recommended)</option>
-                    <option value="kimi-k2.5-thinking" className="bg-gray-900 text-white">Kimi K2.5 Thinking (Reasoning)</option>
-                    <option value="kimi-k2" className="bg-gray-900 text-white">Kimi K2</option>
-                  </>
-                )}
+                {availableModels.map((model) => (
+                  <option key={model.id} value={model.id} className="bg-gray-900 text-white">
+                    {model.label}
+                  </option>
+                ))}
               </select>
+              <p className="mt-2 text-xs text-gray-500">
+                {isLoadingModelCatalog
+                  ? 'Loading the latest model catalog...'
+                  : llmProvider === 'openrouter'
+                    ? `Showing ${availableModels.length} OpenRouter text models from Jan 2025 onward (${freeModelCount} free, ${paidModelCount} paid).`
+                    : llmProvider === 'xai'
+                      ? `Showing ${availableModels.length} current xAI text models from the official xAI model catalog.`
+                      : `Showing ${availableModels.length} model options for ${selectedProvider.label}.`}
+              </p>
             </div>
 
             {/* Complexity Level */}
