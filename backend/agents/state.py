@@ -164,6 +164,41 @@ class IntegrationDefinition(TypedDict, total=False):
     auth_type: Literal["Basic", "OAuth2", "PrincipalPropagation", "None"]
 
 
+class ServiceModuleDefinition(TypedDict, total=False):
+    """Logical service grouping for enterprise-oriented projects."""
+    name: str
+    purpose: str
+    entities: list[str]
+    exposure_type: Literal["transactional", "catalog", "analytics", "admin", "integration"]
+
+
+class UIAppDefinition(TypedDict, total=False):
+    """Generated UI application plan."""
+    name: str
+    main_entity: str
+    app_type: Literal["list_report", "worklist", "overview_page", "analytical_list_page"]
+    service_module: str
+
+
+class VerificationCheck(TypedDict, total=False):
+    """Single verification or readiness gate result."""
+    name: str
+    status: Literal["passed", "failed", "skipped", "warning"]
+    details: str
+
+
+class EnterpriseBlueprint(TypedDict, total=False):
+    """High-level enterprise architecture plan for the generated app."""
+    solution_type: str
+    domain_summary: str
+    service_modules: list[ServiceModuleDefinition]
+    ui_apps: list[UIAppDefinition]
+    quality_gates: list[str]
+    deployment_modules: list[str]
+    architecture_decisions: list[str]
+    delivery_scope: list[str]
+
+
 class RestrictionDefinition(TypedDict, total=False):
     """Entity access restriction."""
     entity: str
@@ -270,7 +305,16 @@ class BuilderState(TypedDict, total=False):
     # Complexity Level
     # -------------------------------------------------------------------------
     complexity_level: str  # ComplexityLevel value — controls generation depth
-    
+
+    # -------------------------------------------------------------------------
+    # Enterprise Architecture Planning
+    # -------------------------------------------------------------------------
+    enterprise_blueprint: EnterpriseBlueprint
+    architecture_context_md: str
+    service_modules: list[ServiceModuleDefinition]
+    ui_apps: list[UIAppDefinition]
+    quality_gates: list[str]
+
     # -------------------------------------------------------------------------
     # Agent Execution State
     # -------------------------------------------------------------------------
@@ -307,7 +351,11 @@ class BuilderState(TypedDict, total=False):
     generation_status: str  # GenerationStatus value
     generation_started_at: str | None
     generation_completed_at: str | None
-    
+    generated_workspace_path: str | None
+    generated_manifest: dict[str, Any] | None
+    verification_checks: list[VerificationCheck]
+    verification_summary: dict[str, Any] | None
+
     # -------------------------------------------------------------------------
     # Inter-Agent Context (agents see each other's actual output)
     # -------------------------------------------------------------------------
@@ -387,7 +435,14 @@ def create_initial_state(
         
         # Complexity
         complexity_level=ComplexityLevel.STANDARD.value,
-        
+
+        # Enterprise Architecture
+        enterprise_blueprint={},
+        architecture_context_md="",
+        service_modules=[],
+        ui_apps=[],
+        quality_gates=[],
+
         # Execution
         current_agent="",
         agent_history=[],
@@ -408,7 +463,11 @@ def create_initial_state(
         generation_status=GenerationStatus.PENDING.value,
         generation_started_at=None,
         generation_completed_at=None,
-        
+        generated_workspace_path=None,
+        generated_manifest=None,
+        verification_checks=[],
+        verification_summary=None,
+
         # Inter-Agent Context
         generated_schema_cds="",
         generated_common_cds="",

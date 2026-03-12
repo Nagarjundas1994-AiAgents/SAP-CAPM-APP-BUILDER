@@ -33,7 +33,10 @@ class SessionCreate(BaseModel):
 
 class SessionUpdate(BaseModel):
     """Request to update session configuration."""
-    configuration: dict[str, Any]
+    project_name: str | None = None
+    project_namespace: str | None = None
+    project_description: str | None = None
+    configuration: dict[str, Any] | None = None
 
 
 class SessionResponse(BaseModel):
@@ -202,10 +205,17 @@ async def update_session(
             detail=f"Session {session_id} not found",
         )
     
-    # Merge configuration
-    current_config = session.configuration or {}
-    current_config.update(request.configuration)
-    session.configuration = current_config
+    if request.project_name is not None:
+        session.project_name = request.project_name
+    if request.project_namespace is not None:
+        session.project_namespace = request.project_namespace
+    if request.project_description is not None:
+        session.project_description = request.project_description
+
+    if request.configuration is not None:
+        current_config = session.configuration or {}
+        current_config.update(request.configuration)
+        session.configuration = current_config
     session.updated_at = datetime.utcnow()
     
     await db.commit()
@@ -241,6 +251,12 @@ async def update_session_config(
             detail=f"Session {session_id} not found",
         )
     
+    if request.configuration is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="configuration is required for /config updates",
+        )
+
     # Merge configuration
     current_config = session.configuration or {}
     current_config.update(request.configuration)

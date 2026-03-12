@@ -15,6 +15,7 @@ from typing import Any
 
 from backend.agents.llm_providers import get_llm_manager
 from backend.agents.llm_utils import (
+    get_architecture_context,
     generate_with_retry,
     get_schema_context,
     get_service_context,
@@ -160,6 +161,7 @@ HANDLER_GENERATION_PROMPT = """Generate complete service handlers for this SAP C
 Project Name: {project_name}
 Service Name: {service_name}
 
+{architecture_context}
 {schema_context}
 {service_context}
 
@@ -239,11 +241,13 @@ async def business_logic_agent(state: BuilderState) -> BuilderState:
     # Get inter-agent context
     schema_context = get_schema_context(state)
     service_context = get_service_context(state)
+    architecture_context = get_architecture_context(state)
     knowledge = get_business_logic_knowledge()
 
     prompt = HANDLER_GENERATION_PROMPT.format(
         project_name=project_name,
         service_name=service_name,
+        architecture_context=architecture_context or "(architecture blueprint not available)",
         schema_context=schema_context or "(schema not available)",
         service_context=service_context or "(service CDS not available)",
         entities_json=json.dumps(entities, indent=2),

@@ -14,6 +14,7 @@ from typing import Any
 
 from backend.agents.llm_utils import (
     generate_with_retry,
+    get_architecture_context,
     get_schema_context,
     get_service_context,
     store_generated_content,
@@ -80,6 +81,7 @@ Layout: {layout_mode}
 Theme: {fiori_theme}
 Complexity: {complexity}
 
+{architecture_context}
 {service_context}
 
 ENTITIES:
@@ -129,6 +131,7 @@ async def fiori_ui_agent(state: BuilderState) -> BuilderState:
     app_id = project_name.lower().replace(" ", "").replace("-", "").replace("_", "")
 
     service_context = get_service_context(state)
+    architecture_context = get_architecture_context(state)
     knowledge = get_fiori_knowledge()
 
     # Determine root entities (not composition children) for multi-app
@@ -157,6 +160,7 @@ Include ObjectPages for ALL entities within this single app."""
         layout_mode=layout_mode,
         fiori_theme=fiori_theme,
         complexity=complexity,
+        architecture_context=architecture_context or "(architecture blueprint not available)",
         service_context=service_context or "(service CDS not available)",
         entities_json=json.dumps(entities, indent=2),
         relationships_json=json.dumps(relationships, indent=2),

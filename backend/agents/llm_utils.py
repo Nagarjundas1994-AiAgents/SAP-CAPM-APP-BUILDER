@@ -99,6 +99,14 @@ async def generate_with_retry(
     llm_manager = get_llm_manager()
     provider = state.get("llm_provider")
     last_error = None
+    
+    # Determine the actual provider and model name for logging
+    actual_provider = provider or llm_manager.settings.default_llm_provider
+    try:
+        model_name = llm_manager.get_provider(actual_provider).model
+    except Exception:
+        model_name = "unknown"
+    model_tag = f"[{actual_provider}/{model_name}]"
 
     # Inject complexity-level instructions into the prompt
     complexity_instructions = get_complexity_prompt(state)
@@ -121,7 +129,7 @@ async def generate_with_retry(
                     missing = [k for k in required_keys if k not in parsed or not parsed[k]]
                     if missing:
                         last_error = f"Missing required keys: {missing}"
-                        log_progress(state, f"⚠️ [{agent_name}] Attempt {attempt + 1}: {last_error}. Retrying...")
+                        log_progress(state, f"⚠️ {model_tag} [{agent_name}] Attempt {attempt + 1}: {last_error}. Retrying...")
 
                         if attempt < max_retries - 1:
                             current_prompt = f"""Your previous response was missing required keys: {missing}
@@ -134,11 +142,11 @@ Respond with ONLY valid JSON. No markdown, no extra text.
 {prompt}"""
                         continue
                 
-                log_progress(state, f"✅ [{agent_name}] LLM generation successful (attempt {attempt + 1}).")
+                log_progress(state, f"✅ {model_tag} [{agent_name}] LLM generation successful (attempt {attempt + 1}).")
                 return parsed
             else:
                 last_error = "Could not parse JSON from response"
-                log_progress(state, f"⚠️ [{agent_name}] Attempt {attempt + 1}: {last_error}. Retrying...")
+                log_progress(state, f"⚠️ {model_tag} [{agent_name}] Attempt {attempt + 1}: {last_error}. Retrying...")
 
             # Build correction prompt for next attempt
             if attempt < max_retries - 1:
@@ -159,11 +167,11 @@ Start your response with {{ and end with }}.
                 # Exponential backoff for rate limit errors: 5s, 10s, 20s
                 backoff = (5 * (2 ** attempt)) + random.uniform(0.5, 2.0)
                 logger.warning(f"[{agent_name}] Rate limit hit (attempt {attempt + 1}). Backing off {backoff:.1f}s...")
-                log_progress(state, f"⚠️ [{agent_name}] Attempt {attempt + 1} error: Error code: 429 - {str(e)[:80]}. Retrying...")
+                log_progress(state, f"⚠️ {model_tag} [{agent_name}] Attempt {attempt + 1} error: Error code: 429 - {str(e)[:80]}. Retrying...")
                 await asyncio.sleep(backoff)
             else:
                 logger.warning(f"[{agent_name}] LLM attempt {attempt + 1} failed: {e}")
-                log_progress(state, f"⚠️ [{agent_name}] Attempt {attempt + 1} error: {str(e)[:100]}. Retrying...")
+                log_progress(state, f"⚠️ {model_tag} [{agent_name}] Attempt {attempt + 1} error: {str(e)[:100]}. Retrying...")
                 # Small delay even for non-rate-limit errors
                 await asyncio.sleep(2)
 
@@ -213,9 +221,20 @@ def get_handler_context(state: BuilderState) -> str:
     return ""
 
 
+def get_architecture_context(state: BuilderState) -> str:
+    """Get the enterprise architecture blueprint for downstream agents."""
+    architecture = state.get("architecture_context_md", "")
+    if architecture:
+        return f"ENTERPRISE ARCHITECTURE BLUEPRINT:\n{architecture}\n"
+    return ""
+
+
 def get_full_context(state: BuilderState) -> str:
     """Get all available inter-agent context."""
     parts = []
+    architecture_ctx = get_architecture_context(state)
+    if architecture_ctx:
+        parts.append(architecture_ctx)
     schema_ctx = get_schema_context(state)
     if schema_ctx:
         parts.append(schema_ctx)

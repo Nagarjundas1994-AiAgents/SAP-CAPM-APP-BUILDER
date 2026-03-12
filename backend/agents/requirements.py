@@ -395,6 +395,14 @@ async def _generate_with_retry(
     llm_manager = get_llm_manager()
     last_error = None
 
+    # Determine the actual provider and model name for logging
+    actual_provider = provider or llm_manager.settings.default_llm_provider
+    try:
+        model_name = llm_manager.get_provider(actual_provider).model
+    except Exception:
+        model_name = "unknown"
+    model_tag = f"[{actual_provider}/{model_name}]"
+
     # Inject complexity-level instructions into the prompt
     complexity_instructions = get_complexity_prompt(state)
     current_prompt = f"{complexity_instructions}\n\n{prompt}"
@@ -414,14 +422,14 @@ async def _generate_with_retry(
                 # Basic structural validation
                 entities = parsed.get("entities", [])
                 if entities and len(entities) > 0:
-                    log_progress(state, f"✅ LLM generated {len(entities)} entities (attempt {attempt + 1}).")
+                    log_progress(state, f"✅ {model_tag} LLM generated {len(entities)} entities (attempt {attempt + 1}).")
                     return parsed
                 else:
                     last_error = "Response contained empty entities list"
-                    log_progress(state, f"⚠️ Attempt {attempt + 1}: {last_error}. Retrying...")
+                    log_progress(state, f"⚠️ {model_tag} Attempt {attempt + 1}: {last_error}. Retrying...")
             else:
                 last_error = "Could not parse JSON from response"
-                log_progress(state, f"⚠️ Attempt {attempt + 1}: {last_error}. Retrying...")
+                log_progress(state, f"⚠️ {model_tag} Attempt {attempt + 1}: {last_error}. Retrying...")
 
             # Build correction prompt for next attempt
             if attempt < max_retries - 1:
@@ -441,11 +449,11 @@ Start your response with {{ and end with }}.
             if is_rate_limit:
                 backoff = (5 * (2 ** attempt)) + random.uniform(0.5, 2.0)
                 logger.warning(f"Rate limit hit (attempt {attempt + 1}). Backing off {backoff:.1f}s...")
-                log_progress(state, f"⚠️ Attempt {attempt + 1} error: Error code: 429 - {str(e)[:80]}. Retrying...")
+                log_progress(state, f"⚠️ {model_tag} Attempt {attempt + 1} error: Error code: 429 - {str(e)[:80]}. Retrying...")
                 await asyncio.sleep(backoff)
             else:
                 logger.warning(f"LLM attempt {attempt + 1} failed: {e}")
-                log_progress(state, f"⚠️ Attempt {attempt + 1} error: {str(e)[:100]}. Retrying...")
+                log_progress(state, f"⚠️ {model_tag} Attempt {attempt + 1} error: {str(e)[:100]}. Retrying...")
                 await asyncio.sleep(2)
 
             if attempt < max_retries - 1:

@@ -72,7 +72,9 @@ class TestSessionsAPI:
         
         assert response.status_code == status.HTTP_200_OK
         data = response.json()
-        assert isinstance(data, list)
+        assert "sessions" in data
+        assert isinstance(data["sessions"], list)
+        assert "total" in data
 
     def test_update_session(self, client, sample_session_data):
         """Test updating a session."""
@@ -109,7 +111,7 @@ class TestBuilderAPI:
 
     def test_generate_requires_session(self, client):
         """Test that generate requires a valid session."""
-        response = client.post("/api/builder/invalid-session/generate")
+        response = client.post("/api/builder/invalid-session/generate", json={})
         
         assert response.status_code == status.HTTP_404_NOT_FOUND
 

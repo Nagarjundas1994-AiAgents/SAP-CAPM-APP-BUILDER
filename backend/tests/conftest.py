@@ -89,32 +89,46 @@ def sample_builder_state() -> dict:
         "session_id": "test-session-123",
         "project_name": "TestApp",
         "project_namespace": "com.test",
-        "domain_template": "sales",
+        "project_description": "Enterprise sales application",
+        "domain_type": "custom",
         "entities": [
             {
                 "name": "Customer",
                 "description": "Customer entity",
                 "fields": [
-                    {"name": "ID", "type": "UUID", "key": True},
-                    {"name": "name", "type": "String(100)", "nullable": False},
-                    {"name": "email", "type": "String(255)"},
-                ]
+                    {"name": "ID", "type": "UUID", "key": True, "nullable": False},
+                    {"name": "name", "type": "String", "length": 100, "nullable": False},
+                    {"name": "email", "type": "String", "length": 255, "nullable": True},
+                    {"name": "status", "type": "String", "length": 30, "nullable": False, "default": "'Active'"},
+                ],
+                "aspects": ["cuid", "managed"],
             },
             {
                 "name": "Order",
                 "description": "Sales order entity", 
                 "fields": [
-                    {"name": "ID", "type": "UUID", "key": True},
-                    {"name": "orderNumber", "type": "String(20)", "nullable": False},
-                    {"name": "totalAmount", "type": "Decimal(15,2)"},
-                ]
+                    {"name": "ID", "type": "UUID", "key": True, "nullable": False},
+                    {"name": "orderNumber", "type": "String", "length": 20, "nullable": False},
+                    {"name": "totalAmount", "type": "Decimal", "precision": 15, "scale": 2, "nullable": True},
+                    {"name": "status", "type": "String", "length": 30, "nullable": False, "default": "'Draft'"},
+                ],
+                "aspects": ["cuid", "managed"],
             }
         ],
         "fiori_theme": "sap_horizon",
         "fiori_main_entity": "Customer",
         "auth_type": "mock",
-        "roles": ["Viewer", "Editor", "Admin"],
+        "roles": [
+            {"name": "Viewer", "description": "Read only", "scopes": ["read"]},
+            {"name": "Editor", "description": "Read and write", "scopes": ["read", "write"]},
+            {"name": "Admin", "description": "Full access", "scopes": ["read", "write", "admin"]},
+        ],
+        "complexity_level": "enterprise",
         "agent_history": [],
         "validation_errors": [],
-        "artifacts": [],
+        "artifacts_db": [],
+        "artifacts_srv": [],
+        "artifacts_app": [],
+        "artifacts_deployment": [],
+        "artifacts_docs": [],
     }

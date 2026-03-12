@@ -1,0 +1,21 @@
+{
+  "session_id": "d3bd9f1d-309c-485e-bffe-b8fb6711544f",
+  "plan": {
+    "entities": 14,
+    "relationships": 0,
+    "business_rules": 0
+  },
+  "artifacts": {
+    "session_id": "d3bd9f1d-309c-485e-bffe-b8fb6711544f",
+    "status": "plan_approved",
+    "artifacts_db": [],
+    "artifacts_srv": [],
+    "artifacts_app": [],
+    "artifacts_deployment": [],
+    "artifacts_docs": [],
+    "validation_errors": [],
+    "workspace_path": null,
+    "verification_summary": null,
+    "generated_manifest": null
+  }
+}

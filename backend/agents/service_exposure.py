@@ -16,6 +16,7 @@ from typing import Any
 from backend.agents.llm_providers import get_llm_manager
 from backend.agents.llm_utils import (
     generate_with_retry,
+    get_architecture_context,
     get_schema_context,
     store_generated_content,
 )
@@ -200,6 +201,7 @@ Service Name: {service_name}
 Service Path: /{service_path}
 
 {schema_context}
+{architecture_context}
 
 ENTITIES:
 {entities_json}
@@ -280,6 +282,7 @@ async def service_exposure_agent(state: BuilderState) -> BuilderState:
 
     # Get inter-agent context
     schema_context = get_schema_context(state)
+    architecture_context = get_architecture_context(state)
     knowledge = get_service_knowledge()
 
     prompt = SERVICE_GENERATION_PROMPT.format(
@@ -290,6 +293,7 @@ async def service_exposure_agent(state: BuilderState) -> BuilderState:
         service_name=service_name,
         service_path=service_path,
         schema_context=schema_context or "(schema not yet available)",
+        architecture_context=architecture_context or "(architecture blueprint not available)",
         entities_json=json.dumps(entities, indent=2),
         relationships_json=json.dumps(relationships, indent=2),
         business_rules_json=json.dumps(business_rules, indent=2),

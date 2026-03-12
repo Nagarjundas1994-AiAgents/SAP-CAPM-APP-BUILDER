@@ -69,6 +69,7 @@ const STEPS = [
 // Agent definitions
 const AGENTS = [
   { name: 'requirements', displayName: 'Requirements Agent', description: 'Analyzing business requirements' },
+  { name: 'enterprise_architecture', displayName: 'Enterprise Architecture Agent', description: 'Designing the solution blueprint' },
   { name: 'data_modeling', displayName: 'Data Modeling Agent', description: 'Generating CDS schemas' },
   { name: 'db_migration', displayName: 'DB Migration Agent', description: 'Handling DB migrations and MTX' },
   { name: 'integration', displayName: 'Integration Agent', description: 'Connecting external systems' },
@@ -79,6 +80,8 @@ const AGENTS = [
   { name: 'extension', displayName: 'Extension Agent', description: 'Adding extension points' },
   { name: 'deployment', displayName: 'Deployment Agent', description: 'Creating deployment config' },
   { name: 'testing', displayName: 'Testing Agent', description: 'Generating automated tests' },
+  { name: 'project_assembly', displayName: 'Project Assembly Agent', description: 'Materializing the generated workspace' },
+  { name: 'project_verification', displayName: 'Project Verification Agent', description: 'Running readiness checks' },
   { name: 'validation', displayName: 'Validation Agent', description: 'Validating SAP compliance' },
 ];
 
@@ -869,8 +872,8 @@ export default function BuilderPage() {
           </div>
         );
 
-      // Step 4: Services
-      case 4:
+      // Step 5: Services
+      case 5:
         return (
           <div className="space-y-6">
             <p className="text-gray-400">
@@ -901,8 +904,8 @@ export default function BuilderPage() {
           </div>
         );
 
-      // Step 5: Fiori UI
-      case 5:
+      // Step 6: Fiori UI
+      case 6:
         return (
           <div className="space-y-6">
             <p className="text-gray-400">
@@ -939,8 +942,8 @@ export default function BuilderPage() {
           </div>
         );
 
-      // Step 6: Security
-      case 6:
+      // Step 7: Security
+      case 7:
         return (
           <div className="space-y-6">
             <p className="text-gray-400">
@@ -978,8 +981,8 @@ export default function BuilderPage() {
           </div>
         );
 
-      // Step 7: Plan Review
-      case 7:
+      // Step 8: Plan Review
+      case 8:
         return (
           <div className="space-y-6">
             {isLoadingPlan ? (
@@ -1003,8 +1006,8 @@ export default function BuilderPage() {
           </div>
         );
 
-      // Step 8: Generate
-      case 8:
+      // Step 9: Generate
+      case 9:
         return (
           <div className="space-y-6">
             {isGenerating ? (
@@ -1070,8 +1073,8 @@ export default function BuilderPage() {
           </div>
         );
 
-      // Step 9: Download & Modify
-      case 9:
+      // Step 10: Download & Modify
+      case 10:
         return (
           <div className="space-y-6">
             <div className="text-center py-6">
@@ -1082,6 +1085,11 @@ export default function BuilderPage() {
               <p className="text-gray-400">
                 Your SAP application has been generated with {getTotalFiles()} files.
               </p>
+              {result?.workspace_path && (
+                <p className="text-xs text-gray-500 mt-2">
+                  Workspace materialized at: {result.workspace_path}
+                </p>
+              )}
             </div>
 
             {/* Tabbed View: Files vs Preview vs Chat */}
@@ -1182,6 +1190,11 @@ export default function BuilderPage() {
             {/* Action buttons */}
             {session && (
               <div className="flex flex-col items-center gap-4 pt-4">
+                {result?.verification_summary && (
+                  <div className="px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-sm text-gray-300">
+                    Verification: {result.verification_summary.passed ?? 0} passed, {result.verification_summary.failed ?? 0} failed, {result.verification_summary.warnings ?? 0} warnings
+                  </div>
+                )}
                 <div className="flex items-center gap-4 flex-wrap justify-center">
                   <button
                     onClick={() => setShowArtifactEditor(true)}
@@ -1238,7 +1251,7 @@ export default function BuilderPage() {
       onPrevious={handlePrevious}
       canProceed={canProceed()}
       isGenerating={isGenerating}
-      isFullWidth={currentStep === 7 || currentStep === 8}
+      isFullWidth={currentStep === 8 || currentStep === 9}
     >
       {renderStepContent()}
     </WizardLayout>

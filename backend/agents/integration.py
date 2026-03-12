@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import datetime
 from typing import Any
 
 from backend.agents.state import BuilderState, GeneratedFile
@@ -68,11 +69,25 @@ async def integration_agent(state: BuilderState) -> BuilderState:
     Integration Agent
     Generates external service definitions, mashups, and destination logic.
     """
+    now = datetime.utcnow().isoformat()
+    state["current_agent"] = "integration"
+    state["updated_at"] = now
+    state["current_logs"] = []
+
     log_progress(state, "🔌 Starting Integration Agent...")
     
     integrations = state.get("integrations", [])
     if not integrations:
         log_progress(state, "⏩ No external integrations requested. Skipping.")
+        state["agent_history"] = state.get("agent_history", []) + [{
+            "agent_name": "integration",
+            "status": "skipped",
+            "started_at": now,
+            "completed_at": datetime.utcnow().isoformat(),
+            "duration_ms": None,
+            "error": None,
+            "logs": state.get("current_logs", []),
+        }]
         return state
 
     entities = state.get("entities", [])
@@ -132,6 +147,15 @@ async def integration_agent(state: BuilderState) -> BuilderState:
     state["integrations_cd_requires"] = result.get("package_json_requires", {})
 
     state["artifacts_srv"] = generated_files
+    state["agent_history"] = state.get("agent_history", []) + [{
+        "agent_name": "integration",
+        "status": "completed",
+        "started_at": now,
+        "completed_at": datetime.utcnow().isoformat(),
+        "duration_ms": None,
+        "error": None,
+        "logs": state.get("current_logs", []),
+    }]
     
     log_progress(state, f"✅ Generated {len(result.get('external_cds', []))} external services and mashup projection.")
     return state

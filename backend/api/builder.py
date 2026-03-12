@@ -8,7 +8,7 @@ import io
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Body
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -41,6 +41,8 @@ class GenerationStatus(BaseModel):
     validation_errors: list[dict[str, Any]]
     started_at: str | None
     completed_at: str | None
+    workspace_path: str | None = None
+    verification_summary: dict[str, Any] | None = None
 
 
 class ArtifactPreview(BaseModel):
@@ -60,6 +62,9 @@ class GenerationResult(BaseModel):
     artifacts_deployment: list[ArtifactPreview]
     artifacts_docs: list[ArtifactPreview]
     validation_errors: list[dict[str, Any]]
+    workspace_path: str | None = None
+    verification_summary: dict[str, Any] | None = None
+    generated_manifest: dict[str, Any] | None = None
 
 
 # =============================================================================
@@ -69,7 +74,7 @@ class GenerationResult(BaseModel):
 @router.post("/{session_id}/generate", response_model=GenerationStatus)
 async def start_generation(
     session_id: str,
-    request: GenerateRequest,
+    request: GenerateRequest = Body(default_factory=GenerateRequest),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -136,6 +141,14 @@ async def start_generation(
             "artifacts_docs": final_state.get("artifacts_docs", []),
             "agent_history": final_state.get("agent_history", []),
             "validation_errors": final_state.get("validation_errors", []),
+            "enterprise_blueprint": final_state.get("enterprise_blueprint", {}),
+            "service_modules": final_state.get("service_modules", []),
+            "ui_apps": final_state.get("ui_apps", []),
+            "quality_gates": final_state.get("quality_gates", []),
+            "generated_workspace_path": final_state.get("generated_workspace_path"),
+            "generated_manifest": final_state.get("generated_manifest"),
+            "verification_checks": final_state.get("verification_checks", []),
+            "verification_summary": final_state.get("verification_summary"),
         }
         session.completed_at = datetime.utcnow()
         await db.commit()
@@ -150,6 +163,8 @@ async def start_generation(
             validation_errors=final_state.get("validation_errors", []),
             started_at=final_state.get("generation_started_at"),
             completed_at=final_state.get("generation_completed_at"),
+            workspace_path=final_state.get("generated_workspace_path"),
+            verification_summary=final_state.get("verification_summary"),
         )
         
     except Exception as e:
@@ -229,6 +244,14 @@ async def stream_generation(
                         "artifacts_docs": final_state.get("artifacts_docs", []),
                         "agent_history": final_state.get("agent_history", []),
                         "validation_errors": final_state.get("validation_errors", []),
+                        "enterprise_blueprint": final_state.get("enterprise_blueprint", {}),
+                        "service_modules": final_state.get("service_modules", []),
+                        "ui_apps": final_state.get("ui_apps", []),
+                        "quality_gates": final_state.get("quality_gates", []),
+                        "generated_workspace_path": final_state.get("generated_workspace_path"),
+                        "generated_manifest": final_state.get("generated_manifest"),
+                        "verification_checks": final_state.get("verification_checks", []),
+                        "verification_summary": final_state.get("verification_summary"),
                     }
                     s.completed_at = datetime.utcnow()
                     await db.commit()
@@ -269,6 +292,8 @@ async def get_generation_status(
         validation_errors=config.get("validation_errors", []),
         started_at=config.get("generation_started_at"),
         completed_at=config.get("generation_completed_at"),
+        workspace_path=config.get("generated_workspace_path"),
+        verification_summary=config.get("verification_summary"),
     )
 
 
@@ -359,6 +384,9 @@ async def get_artifacts(
         artifacts_deployment=[ArtifactPreview(**a) for a in config.get("artifacts_deployment", [])],
         artifacts_docs=[ArtifactPreview(**a) for a in config.get("artifacts_docs", [])],
         validation_errors=config.get("validation_errors", []),
+        workspace_path=config.get("generated_workspace_path"),
+        verification_summary=config.get("verification_summary"),
+        generated_manifest=config.get("generated_manifest"),
     )
 
 
@@ -384,7 +412,27 @@ async def download_project(
         )
     
     config = session.configuration or {}
-    
+    workspace_path = config.get("generated_workspace_path")
+
+    if workspace_path:
+        from pathlib import Path
+
+        workspace = Path(workspace_path)
+        if workspace.exists():
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                for file_path in workspace.rglob("*"):
+                    if file_path.is_file():
+                        zip_file.write(file_path, file_path.relative_to(workspace).as_posix())
+            zip_buffer.seek(0)
+
+            filename = f"{session.project_name.lower().replace(' ', '-')}.zip"
+            return StreamingResponse(
+                zip_buffer,
+                media_type="application/zip",
+                headers={"Content-Disposition": f"attachment; filename={filename}"},
+            )
+
     # Collect all artifacts
     all_artifacts = []
     for category in ["artifacts_db", "artifacts_srv", "artifacts_app", "artifacts_deployment", "artifacts_docs"]:

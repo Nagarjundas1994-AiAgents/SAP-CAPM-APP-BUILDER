@@ -228,49 +228,19 @@ async def regenerate_app(
     
     # Import here to avoid circular imports
     from backend.agents.graph import run_generation_workflow_streaming
-    from backend.agents.state import BuilderState
-    
-    # Build the initial state from updated config
+    from backend.agents.state import create_initial_state
+
     entities = config.get("entities", [])
-    relationships = config.get("relationships", [])
-    business_rules = config.get("business_rules", [])
-    
-    initial_state: BuilderState = {
-        "session_id": session_id,
-        "project_name": config.get("project_name", session.project_name),
-        "project_namespace": config.get("project_namespace", session.project_namespace or "com.company"),
-        "project_description": config.get("project_description", session.project_description or ""),
-        "domain_template": config.get("domain", "custom"),
-        "entities": entities,
-        "relationships": relationships,
-        "business_rules": business_rules,
-        "fiori_theme": config.get("fiori_theme", "sap_horizon"),
-        "fiori_app_type": config.get("fiori_app_type", "list_report"),
-        "fiori_main_entity": config.get("fiori_main_entity", entities[0]["name"] if entities else ""),
-        "layout_mode": config.get("layout_mode", "flexible_column"),
-        "odata_version": config.get("odata_version", "v4"),
-        "enable_draft": config.get("enable_draft", True),
-        "cap_runtime": config.get("cap_runtime", "nodejs"),
-        "database_type": config.get("database_type", "sqlite"),
-        "auth_type": config.get("auth_type", "mock"),
-        "deployment_target": config.get("deployment_target", "cf"),
-        "roles": config.get("roles", [
-            {"name": "Viewer", "description": "Read-only access", "scopes": ["read"]},
-            {"name": "Editor", "description": "Read and write access", "scopes": ["read", "write"]},
-            {"name": "Admin", "description": "Full access", "scopes": ["read", "write", "delete", "admin"]},
-        ]),
-        "restrictions": config.get("restrictions", []),
-        "llm_provider": config.get("llm_provider", "openai"),
-        "llm_model": config.get("llm_model", "gpt-4-turbo-preview"),
-        "status": "in_progress",
-        "current_agent": "requirements",
-        "agent_history": [],
-        "artifacts": [],
-        "validation_errors": [],
-        "correction_history": [],
-        "needs_correction": False,
-        "retry_counts": {},
-    }
+
+    initial_state = create_initial_state(
+        session_id=session_id,
+        project_name=config.get("project_name", session.project_name),
+        project_namespace=config.get("project_namespace", session.project_namespace or "com.company"),
+        project_description=config.get("project_description", session.project_description or ""),
+    )
+    initial_state.update(config)
+    if not initial_state.get("fiori_main_entity") and entities:
+        initial_state["fiori_main_entity"] = entities[0]["name"]
     
     # Stream the generation using SSE
     import json as json_module
@@ -281,14 +251,35 @@ async def regenerate_app(
             yield f"data: {json_module.dumps({'type': 'connected', 'session_id': session_id, 'regeneration': True})}\n\n"
             
             async for event in run_generation_workflow_streaming(initial_state):
+                if event.get("type") == "workflow_complete":
+                    final_state = event.get("final_state", {})
+                    session_refresh = await db.get(Session, session_id)
+                    if session_refresh:
+                        session_refresh.status = final_state.get("generation_status", "completed")
+                        session_refresh.configuration = {
+                            **(session_refresh.configuration or {}),
+                            "entities": final_state.get("entities", []),
+                            "relationships": final_state.get("relationships", []),
+                            "business_rules": final_state.get("business_rules", []),
+                            "artifacts_db": final_state.get("artifacts_db", []),
+                            "artifacts_srv": final_state.get("artifacts_srv", []),
+                            "artifacts_app": final_state.get("artifacts_app", []),
+                            "artifacts_deployment": final_state.get("artifacts_deployment", []),
+                            "artifacts_docs": final_state.get("artifacts_docs", []),
+                            "agent_history": final_state.get("agent_history", []),
+                            "validation_errors": final_state.get("validation_errors", []),
+                            "enterprise_blueprint": final_state.get("enterprise_blueprint", {}),
+                            "service_modules": final_state.get("service_modules", []),
+                            "ui_apps": final_state.get("ui_apps", []),
+                            "quality_gates": final_state.get("quality_gates", []),
+                            "generated_workspace_path": final_state.get("generated_workspace_path"),
+                            "generated_manifest": final_state.get("generated_manifest"),
+                            "verification_checks": final_state.get("verification_checks", []),
+                            "verification_summary": final_state.get("verification_summary"),
+                        }
+                        session_refresh.completed_at = datetime.utcnow()
+                        await db.commit()
                 yield f"data: {json_module.dumps(event, default=str)}\n\n"
-            
-            # Update session status
-            async with db.begin():
-                session_refresh = await db.get(Session, session_id)
-                if session_refresh:
-                    session_refresh.status = "completed"
-                    session_refresh.completed_at = datetime.utcnow()
                     
         except Exception as e:
             logger.error(f"Regeneration error for session {session_id}: {e}")

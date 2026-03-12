@@ -14,6 +14,7 @@ from langgraph.graph import StateGraph, END
 
 from backend.agents.state import BuilderState, GenerationStatus
 from backend.agents.requirements import requirements_agent
+from backend.agents.enterprise_architecture import enterprise_architecture_agent
 from backend.agents.data_modeling import data_modeling_agent
 from backend.agents.db_migration import db_migration_agent
 from backend.agents.service_exposure import service_exposure_agent
@@ -24,6 +25,8 @@ from backend.agents.extension import extension_agent
 from backend.agents.integration import integration_agent
 from backend.agents.deployment import deployment_agent
 from backend.agents.testing import testing_agent
+from backend.agents.project_assembly import project_assembly_agent
+from backend.agents.project_verification import project_verification_agent
 from backend.agents.validation import validation_agent
 
 logger = logging.getLogger(__name__)
@@ -79,15 +82,18 @@ def create_builder_graph() -> StateGraph:
     
     Flow:
     1. Requirements → validation check
-    2. Data Modeling (Self-Healing)
-    3. Service Exposure (Self-Healing)
-    4. Business Logic (Self-Healing)
-    5. Fiori UI
-    6. Security
-    7. Extension
-    8. Deployment
-    9. Testing (complexity-aware, may skip)
-    10. Validation (final) → self-heal or END
+    2. Enterprise Architecture
+    3. Data Modeling (Self-Healing)
+    4. Service Exposure (Self-Healing)
+    5. Business Logic (Self-Healing)
+    6. Fiori UI
+    7. Security
+    8. Extension
+    9. Deployment
+    10. Testing (complexity-aware, may skip)
+    11. Project Assembly
+    12. Project Verification
+    13. Validation (final) → self-heal or END
     """
     
     # Create the graph
@@ -95,6 +101,7 @@ def create_builder_graph() -> StateGraph:
     
     # Add nodes (agents)
     graph.add_node("requirements", requirements_agent)
+    graph.add_node("enterprise_architecture", enterprise_architecture_agent)
     graph.add_node("data_modeling", data_modeling_agent)
     graph.add_node("db_migration", db_migration_agent)
     graph.add_node("integration", integration_agent)
@@ -105,6 +112,8 @@ def create_builder_graph() -> StateGraph:
     graph.add_node("extension", extension_agent)
     graph.add_node("deployment", deployment_agent)
     graph.add_node("testing", testing_agent)
+    graph.add_node("project_assembly", project_assembly_agent)
+    graph.add_node("project_verification", project_verification_agent)
     graph.add_node("validation", validation_agent)
     
     # Set entry point
@@ -112,15 +121,18 @@ def create_builder_graph() -> StateGraph:
     
     # Add conditional edges
     
-    # 1. Requirements -> Data Modeling
+    # 1. Requirements -> Enterprise Architecture
     graph.add_conditional_edges(
         "requirements",
         should_continue_after_requirements,
         {
-            "data_modeling": "data_modeling",
+            "data_modeling": "enterprise_architecture",
             "end": END,
         }
     )
+
+    # 1.5 Enterprise Architecture -> Data Modeling
+    graph.add_edge("enterprise_architecture", "data_modeling")
     
     # 2. Data Modeling (with retry loop)
     graph.add_conditional_edges(
@@ -205,10 +217,16 @@ def create_builder_graph() -> StateGraph:
         }
     )
     
-    # 9. Testing → Validation
-    graph.add_edge("testing", "validation")
-    
-    # 10. Validation → self-heal back to agent OR end
+    # 9. Testing → Project Assembly
+    graph.add_edge("testing", "project_assembly")
+
+    # 10. Project Assembly → Project Verification
+    graph.add_edge("project_assembly", "project_verification")
+
+    # 11. Project Verification → Validation
+    graph.add_edge("project_verification", "validation")
+
+    # 12. Validation → self-heal back to agent OR end
     graph.add_conditional_edges(
         "validation",
         should_self_heal,
@@ -308,9 +326,10 @@ async def run_generation_workflow_streaming(initial_state: BuilderState):
     
     # Agent order for emitting agent_start events
     AGENT_ORDER = [
-        "requirements", "data_modeling", "db_migration", "integration", "service_exposure",
-        "business_logic", "fiori_ui", "security",
-        "extension", "deployment", "testing", "validation",
+        "requirements", "enterprise_architecture", "data_modeling", "db_migration",
+        "integration", "service_exposure", "business_logic", "fiori_ui", "security",
+        "extension", "deployment", "testing", "project_assembly",
+        "project_verification", "validation",
     ]
     
     final_state: dict[str, Any] = {}
