@@ -123,7 +123,7 @@ const FALLBACK_PROVIDER_OPTIONS: ProviderSummary[] = [
   { id: 'gemini', label: 'Google Gemini', configured: false, default_model: 'gemini-1.5-pro', catalog_type: 'static' },
   { id: 'deepseek', label: 'DeepSeek', configured: false, default_model: 'deepseek-chat', catalog_type: 'static' },
   { id: 'kimi', label: 'Kimi (Moonshot)', configured: false, default_model: 'kimi-k2.5', catalog_type: 'static' },
-  { id: 'xai', label: 'xAI', configured: false, default_model: 'grok-4.20-beta-0309-reasoning', catalog_type: 'live' },
+  { id: 'xai', label: 'xAI', configured: false, default_model: 'grok-4-1-fast-reasoning', catalog_type: 'live' },
   { id: 'openrouter', label: 'OpenRouter', configured: false, default_model: null, catalog_type: 'live' },
 ];
 
@@ -223,6 +223,19 @@ export default function BuilderPage() {
         if (!isMounted || config.supported_providers.length === 0) return;
 
         setProviderOptions(config.supported_providers);
+        
+        if (config.default_provider) {
+          setLlmProvider(config.default_provider);
+          
+          if (config.default_model) {
+            setLlmModel(config.default_model);
+          } else {
+            const defaultProviderSpec = config.supported_providers.find((p: ProviderSummary) => p.id === config.default_provider);
+            if (defaultProviderSpec?.default_model) {
+              setLlmModel(defaultProviderSpec.default_model);
+            }
+          }
+        }
       } catch (error) {
         console.error('Failed to load provider configuration:', error);
       }

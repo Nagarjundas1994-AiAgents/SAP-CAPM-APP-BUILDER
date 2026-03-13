@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models.session import Session
 from backend.agents.llm_providers import get_llm_manager
+from backend.agents.llm_utils import parse_llm_json
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -99,23 +100,32 @@ Current Content:
 
     try:
         logger.info(f"Copilot modifying {request.path} via {provider}...")
-        response = await llm.generate_structured(
-            provider=provider,
+
+        # Update system prompt to request JSON output with modified_content and explanation
+        json_system_prompt = system_prompt + '''
+
+Additionally, you MUST wrap your response in a JSON object with exactly these keys:
+{
+  "modified_content": "<the full modified source code>",
+  "explanation": "<brief explanation of what was changed>"
+}
+Respond with ONLY this JSON object. No markdown fences, no extra text.'''
+
+        response_text = await llm.generate(
             prompt=user_prompt,
-            system_prompt=system_prompt,
-            response_schema={
-                "type": "object",
-                "properties": {
-                    "modified_content": {"type": "string", "description": "The exact modified source code. No backticks."},
-                    "explanation": {"type": "string", "description": "Brief explanation of what was changed."}
-                },
-                "required": ["modified_content", "explanation"]
-            }
+            system_prompt=json_system_prompt,
+            provider=provider,
         )
-        
-        # 4. Save modifications back to DB
-        modified_content = response.get("modified_content", target_artifact["content"])
-        explanation = response.get("explanation", "Modification applied successfully.")
+
+        response = parse_llm_json(response_text)
+
+        if response and "modified_content" in response:
+            modified_content = response["modified_content"]
+            explanation = response.get("explanation", "Modification applied successfully.")
+        else:
+            # Fallback: treat the entire response as the modified content
+            modified_content = response_text.strip()
+            explanation = "Modification applied successfully."
         
         target_artifact["content"] = modified_content
         session.configuration = config  # update JSON column

@@ -170,6 +170,7 @@ async def get_config():
         "available_providers": settings.available_providers,
         "supported_providers": get_supported_providers(settings),
         "default_provider": settings.default_llm_provider,
+        "default_model": settings.default_llm_model,
     }
 
 

@@ -1,0 +1,140 @@
+﻿{
+    "provider":  "xai",
+    "configured":  false,
+    "source":  "xai_docs",
+    "fetched_at":  "2026-03-12T19:22:01Z",
+    "models":  [
+                   {
+                       "id":  "grok-4.20-multi-agent-beta-0309",
+                       "name":  "Grok 4.20 Multi-Agent Beta 0309",
+                       "label":  "Grok 4.20 Multi-Agent Beta 0309 (Paid)",
+                       "pricing_type":  "paid",
+                       "price_summary":  "$2.00 ($0.20) / $6.00",
+                       "created_at":  null,
+                       "context_length":  2000000,
+                       "description":  "Capabilities: functions, structured, reasoning. Rate limits: 4M TPM, 607 RPM.",
+                       "source":  "https://docs.x.ai/docs/models.md",
+                       "recommended":  true
+                   },
+                   {
+                       "id":  "grok-4.20-beta-0309-reasoning",
+                       "name":  "Grok 4.20 Beta 0309 Reasoning",
+                       "label":  "Grok 4.20 Beta 0309 Reasoning (Paid)",
+                       "pricing_type":  "paid",
+                       "price_summary":  "$2.00 ($0.20) / $6.00",
+                       "created_at":  null,
+                       "context_length":  2000000,
+                       "description":  "Capabilities: functions, structured, reasoning. Rate limits: 4M TPM, 607 RPM.",
+                       "source":  "https://docs.x.ai/docs/models.md",
+                       "recommended":  false
+                   },
+                   {
+                       "id":  "grok-4.20-beta-0309-non-reasoning",
+                       "name":  "Grok 4.20 Beta 0309 Non Reasoning",
+                       "label":  "Grok 4.20 Beta 0309 Non Reasoning (Paid)",
+                       "pricing_type":  "paid",
+                       "price_summary":  "$2.00 ($0.20) / $6.00",
+                       "created_at":  null,
+                       "context_length":  2000000,
+                       "description":  "Capabilities: functions, structured. Rate limits: 4M TPM, 607 RPM.",
+                       "source":  "https://docs.x.ai/docs/models.md",
+                       "recommended":  false
+                   },
+                   {
+                       "id":  "grok-4-1-fast-reasoning",
+                       "name":  "Grok 4 1 Fast Reasoning",
+                       "label":  "Grok 4 1 Fast Reasoning (Paid)",
+                       "pricing_type":  "paid",
+                       "price_summary":  "$0.20 ($0.05) / $0.50",
+                       "created_at":  null,
+                       "context_length":  2000000,
+                       "description":  "Capabilities: functions, structured, reasoning. Rate limits: 4M TPM, 607 RPM.",
+                       "source":  "https://docs.x.ai/docs/models.md",
+                       "recommended":  false
+                   },
+                   {
+                       "id":  "grok-4-1-fast-non-reasoning",
+                       "name":  "Grok 4 1 Fast Non Reasoning",
+                       "label":  "Grok 4 1 Fast Non Reasoning (Paid)",
+                       "pricing_type":  "paid",
+                       "price_summary":  "$0.20 ($0.05) / $0.50",
+                       "created_at":  null,
+                       "context_length":  2000000,
+                       "description":  "Capabilities: functions, structured. Rate limits: 4M TPM, 607 RPM.",
+                       "source":  "https://docs.x.ai/docs/models.md",
+                       "recommended":  false
+                   },
+                   {
+                       "id":  "grok-code-fast-1",
+                       "name":  "Grok Code Fast 1",
+                       "label":  "Grok Code Fast 1 (Paid)",
+                       "pricing_type":  "paid",
+                       "price_summary":  "$0.20 ($0.02) / $1.50",
+                       "created_at":  null,
+                       "context_length":  256000,
+                       "description":  "Capabilities: functions, structured, reasoning. Rate limits: 2M TPM, 2,125 RPM.",
+                       "source":  "https://docs.x.ai/docs/models.md",
+                       "recommended":  false
+                   },
+                   {
+                       "id":  "grok-4-0709",
+                       "name":  "Grok 4 0709",
+                       "label":  "Grok 4 0709 (Paid)",
+                       "pricing_type":  "paid",
+                       "price_summary":  "$3.00 ($0.75) / $15.00",
+                       "created_at":  null,
+                       "context_length":  256000,
+                       "description":  "Capabilities: functions, structured, reasoning. Rate limits: 20M TPM, 500 RPM.",
+                       "source":  "https://docs.x.ai/docs/models.md",
+                       "recommended":  false
+                   },
+                   {
+                       "id":  "grok-3",
+                       "name":  "Grok 3",
+                       "label":  "Grok 3 (Paid)",
+                       "pricing_type":  "paid",
+                       "price_summary":  "$3.00 ($0.75) / $15.00",
+                       "created_at":  null,
+                       "context_length":  131072,
+                       "description":  "Capabilities: functions, structured. Rate limits: 4M TPM, 900 RPM.",
+                       "source":  "https://docs.x.ai/docs/models.md",
+                       "recommended":  false
+                   },
+                   {
+                       "id":  "grok-3-mini",
+                       "name":  "Grok 3 Mini",
+                       "label":  "Grok 3 Mini (Paid)",
+                       "pricing_type":  "paid",
+                       "price_summary":  "$0.30 ($0.07) / $0.50",
+                       "created_at":  null,
+                       "context_length":  131072,
+                       "description":  "Capabilities: functions, structured, reasoning. Rate limits: 4M TPM, 1,450 RPM.",
+                       "source":  "https://docs.x.ai/docs/models.md",
+                       "recommended":  false
+                   },
+                   {
+                       "id":  "grok-4-fast-non-reasoning",
+                       "name":  "Grok 4 Fast Non Reasoning",
+                       "label":  "Grok 4 Fast Non Reasoning (Paid)",
+                       "pricing_type":  "paid",
+                       "price_summary":  "$0.20 ($0.05) / $0.50",
+                       "created_at":  null,
+                       "context_length":  2000000,
+                       "description":  "Capabilities: functions, structured. Rate limits: 10M TPM, 620 RPM.",
+                       "source":  "https://docs.x.ai/docs/models.md",
+                       "recommended":  false
+                   },
+                   {
+                       "id":  "grok-4-fast-reasoning",
+                       "name":  "Grok 4 Fast Reasoning",
+                       "label":  "Grok 4 Fast Reasoning (Paid)",
+                       "pricing_type":  "paid",
+                       "price_summary":  "$0.20 ($0.05) / $0.50",
+                       "created_at":  null,
+                       "context_length":  2000000,
+                       "description":  "Capabilities: functions, structured, reasoning. Rate limits: 4M TPM, 607 RPM.",
+                       "source":  "https://docs.x.ai/docs/models.md",
+                       "recommended":  false
+                   }
+               ]
+}

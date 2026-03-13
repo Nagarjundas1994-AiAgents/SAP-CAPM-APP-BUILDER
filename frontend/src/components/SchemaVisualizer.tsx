@@ -16,6 +16,7 @@ interface EntityField {
   name: string;
   type: string;
   isKey?: boolean;
+  key?: boolean; // Coming from the backend plan
 }
 
 interface EntityDefinition {
@@ -44,8 +45,8 @@ const EntityNode = ({ data }: { data: EntityDefinition }) => {
           
           return (
             <div key={idx} className="flex items-center justify-between text-xs px-2 py-1 rounded hover:bg-white/5">
-              <span className={`font-medium ${field.isKey ? 'text-blue-400' : isForeignKey ? 'text-purple-400' : 'text-gray-300'}`}>
-                {field.isKey && '🔑 '}{field.name}
+              <span className={`font-medium ${(field.key || field.isKey) ? 'text-blue-400' : isForeignKey ? 'text-purple-400' : 'text-gray-300'}`}>
+                {(field.key || field.isKey) && '🔑 '}{field.name}
               </span>
               <span className="text-gray-500 font-mono text-[10px]">{field.type}</span>
             </div>
@@ -124,7 +125,7 @@ export default function SchemaVisualizer({ entities }: SchemaVisualizerProps) {
   }, [initialNodes, initialEdges, setNodes, setEdges]);
 
   return (
-    <div className="w-full h-full min-h-[500px] border border-white/10 rounded-xl overflow-hidden bg-black/40">
+    <div className="w-full h-[500px] border border-white/10 rounded-xl overflow-hidden bg-black/40">
       <ReactFlow
         nodes={nodes}
         edges={edges}
