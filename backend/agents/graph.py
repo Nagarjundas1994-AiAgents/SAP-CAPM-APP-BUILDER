@@ -15,19 +15,42 @@ from langgraph.graph import StateGraph, END
 from backend.agents.state import BuilderState, GenerationStatus
 from backend.agents.requirements import requirements_agent
 from backend.agents.enterprise_architecture import enterprise_architecture_agent
+from backend.agents.domain_modeling import domain_modeling_agent
 from backend.agents.data_modeling import data_modeling_agent
 from backend.agents.db_migration import db_migration_agent
+from backend.agents.integration_design import integration_design_agent
 from backend.agents.service_exposure import service_exposure_agent
+from backend.agents.error_handling import error_handling_agent
+from backend.agents.audit_logging import audit_logging_agent
+from backend.agents.api_governance import api_governance_agent
 from backend.agents.business_logic import business_logic_agent
+from backend.agents.ux_design import ux_design_agent
 from backend.agents.fiori_ui import fiori_ui_agent
 from backend.agents.security import security_agent
+from backend.agents.multitenancy import multitenancy_agent
+from backend.agents.i18n import i18n_agent
+from backend.agents.feature_flags import feature_flags_agent
+from backend.agents.compliance_check import compliance_check_agent
 from backend.agents.extension import extension_agent
-from backend.agents.integration import integration_agent
+from backend.agents.performance_review import performance_review_agent
+from backend.agents.ci_cd import ci_cd_agent
 from backend.agents.deployment import deployment_agent
 from backend.agents.testing import testing_agent
+from backend.agents.observability import observability_agent
+from backend.agents.documentation import documentation_agent
+from backend.agents.integration import integration_agent
 from backend.agents.project_assembly import project_assembly_agent
 from backend.agents.project_verification import project_verification_agent
 from backend.agents.validation import validation_agent
+from backend.agents.human_gate import (
+    gate_1_requirements,
+    gate_2_architecture,
+    gate_3_data_layer,
+    gate_4_service_layer,
+    gate_5_business_logic,
+    gate_6_pre_deployment,
+    gate_7_final_release,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +58,38 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # Route Functions
 # =============================================================================
+
+def make_retry_router(agent_name: str, next_node: str):
+    """
+    Factory function to create retry routers for agents.
+    
+    Args:
+        agent_name: Name of the agent
+        next_node: Node to route to on success
+        
+    Returns:
+        Router function
+    """
+    def router(state: BuilderState) -> str:
+        # Check if agent failed (max retries exhausted)
+        if state.get("agent_failed"):
+            return "failed"
+        
+        # Check if correction is needed and retries not exhausted
+        retry_count = state.get("retry_counts", {}).get(agent_name, 0)
+        max_retries = state.get("MAX_RETRIES", 5)
+        
+        if state.get("needs_correction") and retry_count < max_retries:
+            return "retry"
+        
+        if retry_count >= max_retries:
+            state["agent_failed"] = True
+            return "failed"
+        
+        return "continue"
+    
+    return router
+
 
 def should_retry_agent(state: BuilderState) -> str:
     """
@@ -47,16 +102,16 @@ def should_retry_agent(state: BuilderState) -> str:
     return "continue"
 
 
-def should_continue_after_requirements(state: BuilderState) -> Literal["data_modeling", "end"]:
+def should_continue_after_requirements(state: BuilderState) -> Literal["enterprise_architecture", "failed"]:
     """Check if requirements agent succeeded and we should continue."""
     errors = state.get("validation_errors", [])
     has_critical_error = any(e.get("severity") == "error" for e in errors)
     
     if has_critical_error:
         logger.warning("Requirements validation failed, stopping workflow")
-        return "end"
+        return "failed"
     
-    return "data_modeling"
+    return "enterprise_architecture"
 
 
 def should_self_heal(state: BuilderState) -> str:
@@ -66,75 +121,286 @@ def should_self_heal(state: BuilderState) -> str:
     """
     if state.get("needs_correction"):
         target = state.get("correction_agent", "")
-        if target in ("data_modeling", "service_exposure", "business_logic", "fiori_ui", "security"):
+        valid_targets = [
+            "enterprise_architecture", "domain_modeling", "data_modeling",
+            "integration_design", "service_exposure", "error_handling",
+            "business_logic", "fiori_ui", "security", "multitenancy",
+            "compliance_check", "performance_review", "deployment", "testing"
+        ]
+        if target in valid_targets:
             logger.info(f"Self-healing: routing back to {target}")
             return target
     return "end"
 
 
+def should_continue_after_gate(state: BuilderState, next_node: str, refine_node: str) -> str:
+    """
+    Decide if a human gate approved continuation or requested refinement.
+    
+    Args:
+        state: Current BuilderState
+        next_node: Node to go to if approved
+        refine_node: Node to go to if refinement requested
+        
+    Returns:
+        next_node if approved, refine_node if refinement requested
+    """
+    if state.get("needs_correction"):
+        correction_agent = state.get("correction_agent", refine_node)
+        logger.info(f"Gate refinement: routing to {correction_agent}")
+        return correction_agent
+    
+    logger.info(f"Gate approved: continuing to {next_node}")
+    return next_node
+
+
 # =============================================================================
-# Graph Builder
+# Parallel Phase Fan-In Functions
+# =============================================================================
+
+async def parallel_phase_1_fanin(state: BuilderState) -> BuilderState:
+    """
+    Fan-in for Parallel Phase 1 (service_exposure + integration_design).
+    Checks both agents completed successfully.
+    """
+    logger.info("Parallel Phase 1 fan-in: checking service_exposure + integration_design")
+    
+    # Check if any agent failed
+    if state.get("agent_failed"):
+        logger.error("Parallel Phase 1: At least one agent failed")
+        state["generation_status"] = GenerationStatus.FAILED.value
+    
+    return state
+
+
+async def parallel_phase_2_fanin(state: BuilderState) -> BuilderState:
+    """
+    Fan-in for Parallel Phase 2 (error_handling + audit_logging + api_governance).
+    Checks all three agents completed successfully.
+    """
+    logger.info("Parallel Phase 2 fan-in: checking error_handling + audit_logging + api_governance")
+    
+    # Check if any agent failed
+    if state.get("agent_failed"):
+        logger.error("Parallel Phase 2: At least one agent failed")
+        state["generation_status"] = GenerationStatus.FAILED.value
+    
+    return state
+
+
+async def parallel_phase_3_fanin(state: BuilderState) -> BuilderState:
+    """
+    Fan-in for Parallel Phase 3 (fiori_ui + security + multitenancy + i18n + feature_flags).
+    Checks all five agents completed successfully.
+    """
+    logger.info("Parallel Phase 3 fan-in: checking fiori_ui + security + multitenancy + i18n + feature_flags")
+    
+    # Check if any agent failed
+    if state.get("agent_failed"):
+        logger.error("Parallel Phase 3: At least one agent failed")
+        state["generation_status"] = GenerationStatus.FAILED.value
+    
+    return state
+
+
+async def parallel_phase_4_fanin(state: BuilderState) -> BuilderState:
+    """
+    Fan-in for Parallel Phase 4 (testing + documentation + observability).
+    Checks all three agents completed successfully.
+    """
+    logger.info("Parallel Phase 4 fan-in: checking testing + documentation + observability")
+    
+    # Check if any agent failed
+    if state.get("agent_failed"):
+        logger.error("Parallel Phase 4: At least one agent failed")
+        state["generation_status"] = GenerationStatus.FAILED.value
+    
+    return state
+
+
+async def failed_terminal(state: BuilderState) -> BuilderState:
+    """
+    FAILED terminal node.
+    Sets generation status to FAILED and logs error context.
+    """
+    logger.error("Workflow reached FAILED terminal")
+    
+    state["generation_status"] = GenerationStatus.FAILED.value
+    state["generation_completed_at"] = datetime.utcnow().isoformat()
+    
+    # Emit workflow_failed event
+    from backend.agents.progress import push_event
+    session_id = state.get("session_id", "unknown")
+    
+    try:
+        import asyncio
+        asyncio.create_task(push_event(session_id, {
+            "type": "workflow_failed",
+            "status": "failed",
+            "error": "Workflow failed - check agent history for details",
+            "agent_history": state.get("agent_history", []),
+            "validation_errors": state.get("validation_errors", []),
+            "timestamp": datetime.utcnow().isoformat(),
+        }))
+    except Exception as e:
+        logger.error(f"Failed to emit workflow_failed event: {e}")
+    
+    return state
+
+
+# =============================================================================
+# Graph Builder (UPGRADED - World-Class Enterprise Architecture)
 # =============================================================================
 
 def create_builder_graph() -> StateGraph:
     """
     Create the LangGraph workflow for the SAP App Builder.
     
+    UPGRADED ARCHITECTURE with 28 agents, 7 human gates, 4 parallel phases.
+    
     Flow:
-    1. Requirements → validation check
-    2. Enterprise Architecture
-    3. Data Modeling (Self-Healing)
-    4. Service Exposure (Self-Healing)
-    5. Business Logic (Self-Healing)
-    6. Fiori UI
-    7. Security
-    8. Extension
-    9. Deployment
-    10. Testing (complexity-aware, may skip)
-    11. Project Assembly
-    12. Project Verification
-    13. Validation (final) → self-heal or END
+    1. Requirements → Gate 1
+    2. Enterprise Architecture → Gate 2
+    3. Domain Modeling
+    4. Data Modeling
+    5. DB Migration → Gate 3
+    6. Parallel Phase 1: Service Exposure + Integration Design → Gate 4
+    7. Parallel Phase 2: Error Handling + Audit Logging + API Governance
+    8. Business Logic → Gate 5 (CRITICAL - UI starts after this)
+    9. UX Design
+    10. Parallel Phase 3: Fiori UI + Security + Multitenancy + i18n + Feature Flags
+    11. Compliance Check
+    12. Extension
+    13. Performance Review → Gate 6
+    14. CI/CD
+    15. Deployment
+    16. Parallel Phase 4: Testing + Documentation + Observability
+    17. Project Assembly
+    18. Project Verification
+    19. Validation → Gate 7 or self-heal
+    20. SUCCESS or FAILED terminal
     """
     
     # Create the graph
     graph = StateGraph(BuilderState)
     
-    # Add nodes (agents)
+    # =========================================================================
+    # Add all agent nodes (28 total)
+    # =========================================================================
     graph.add_node("requirements", requirements_agent)
     graph.add_node("enterprise_architecture", enterprise_architecture_agent)
+    graph.add_node("domain_modeling", domain_modeling_agent)
     graph.add_node("data_modeling", data_modeling_agent)
     graph.add_node("db_migration", db_migration_agent)
-    graph.add_node("integration", integration_agent)
+    graph.add_node("integration_design", integration_design_agent)
     graph.add_node("service_exposure", service_exposure_agent)
+    graph.add_node("error_handling", error_handling_agent)
+    graph.add_node("audit_logging", audit_logging_agent)
+    graph.add_node("api_governance", api_governance_agent)
     graph.add_node("business_logic", business_logic_agent)
+    graph.add_node("ux_design", ux_design_agent)
     graph.add_node("fiori_ui", fiori_ui_agent)
     graph.add_node("security", security_agent)
+    graph.add_node("multitenancy", multitenancy_agent)
+    graph.add_node("i18n", i18n_agent)
+    graph.add_node("feature_flags", feature_flags_agent)
+    graph.add_node("compliance_check", compliance_check_agent)
     graph.add_node("extension", extension_agent)
+    graph.add_node("performance_review", performance_review_agent)
+    graph.add_node("ci_cd", ci_cd_agent)
     graph.add_node("deployment", deployment_agent)
     graph.add_node("testing", testing_agent)
+    graph.add_node("observability", observability_agent)
+    graph.add_node("documentation", documentation_agent)
+    graph.add_node("integration", integration_agent)
     graph.add_node("project_assembly", project_assembly_agent)
     graph.add_node("project_verification", project_verification_agent)
     graph.add_node("validation", validation_agent)
     
+    # =========================================================================
+    # Add human gate nodes (7 gates)
+    # =========================================================================
+    graph.add_node("gate_1_requirements", gate_1_requirements)
+    graph.add_node("gate_2_architecture", gate_2_architecture)
+    graph.add_node("gate_3_data_layer", gate_3_data_layer)
+    graph.add_node("gate_4_service_layer", gate_4_service_layer)
+    graph.add_node("gate_5_business_logic", gate_5_business_logic)
+    graph.add_node("gate_6_pre_deployment", gate_6_pre_deployment)
+    graph.add_node("gate_7_final_release", gate_7_final_release)
+    
+    # =========================================================================
+    # Add parallel phase fan-in nodes
+    # =========================================================================
+    graph.add_node("parallel_phase_1_fanin", parallel_phase_1_fanin)
+    graph.add_node("parallel_phase_2_fanin", parallel_phase_2_fanin)
+    graph.add_node("parallel_phase_3_fanin", parallel_phase_3_fanin)
+    graph.add_node("parallel_phase_4_fanin", parallel_phase_4_fanin)
+    
+    # =========================================================================
+    # Add FAILED terminal node
+    # =========================================================================
+    graph.add_node("failed", failed_terminal)
+    
+    # =========================================================================
     # Set entry point
+    # =========================================================================
     graph.set_entry_point("requirements")
     
-    # Add conditional edges
+    # =========================================================================
+    # Build the workflow edges
+    # =========================================================================
     
-    # 1. Requirements -> Enterprise Architecture
+    # 1. Requirements → Gate 1
     graph.add_conditional_edges(
         "requirements",
         should_continue_after_requirements,
         {
-            "data_modeling": "enterprise_architecture",
-            "end": END,
+            "enterprise_architecture": "gate_1_requirements",
+            "failed": "failed",
         }
     )
-
-    # 1.5 Enterprise Architecture -> Data Modeling
-    graph.add_edge("enterprise_architecture", "data_modeling")
     
-    # 2. Data Modeling (with retry loop)
+    # 1a. Gate 1 → Enterprise Architecture or refine Requirements
+    graph.add_conditional_edges(
+        "gate_1_requirements",
+        lambda state: should_continue_after_gate(state, "enterprise_architecture", "requirements"),
+        {
+            "enterprise_architecture": "enterprise_architecture",
+            "requirements": "requirements",
+        }
+    )
+    
+    # 2. Enterprise Architecture → Gate 2 (with retry)
+    graph.add_conditional_edges(
+        "enterprise_architecture",
+        should_retry_agent,
+        {
+            "retry": "enterprise_architecture",
+            "continue": "gate_2_architecture",
+        }
+    )
+    
+    # 2a. Gate 2 → Domain Modeling or refine Enterprise Architecture
+    graph.add_conditional_edges(
+        "gate_2_architecture",
+        lambda state: should_continue_after_gate(state, "domain_modeling", "enterprise_architecture"),
+        {
+            "domain_modeling": "domain_modeling",
+            "enterprise_architecture": "enterprise_architecture",
+        }
+    )
+    
+    # 3. Domain Modeling → Data Modeling (with retry)
+    graph.add_conditional_edges(
+        "domain_modeling",
+        should_retry_agent,
+        {
+            "retry": "domain_modeling",
+            "continue": "data_modeling",
+        }
+    )
+    
+    # 4. Data Modeling → DB Migration (with retry)
     graph.add_conditional_edges(
         "data_modeling",
         should_retry_agent,
@@ -143,11 +409,28 @@ def create_builder_graph() -> StateGraph:
             "continue": "db_migration",
         }
     )
-
-    # 2.1 DB Migration
-    graph.add_edge("db_migration", "integration")
     
-    # 2.5 Integration (with retry loop)
+    # 5. DB Migration → Gate 3 (with retry)
+    graph.add_conditional_edges(
+        "db_migration",
+        should_retry_agent,
+        {
+            "retry": "db_migration",
+            "continue": "gate_3_data_layer",
+        }
+    )
+    
+    # 5a. Gate 3 → Integration or refine DB Migration
+    graph.add_conditional_edges(
+        "gate_3_data_layer",
+        lambda state: should_continue_after_gate(state, "integration", "db_migration"),
+        {
+            "integration": "integration",
+            "db_migration": "db_migration",
+        }
+    )
+    
+    # 6. Integration → Service Exposure (with retry)
     graph.add_conditional_edges(
         "integration",
         should_retry_agent,
@@ -157,27 +440,105 @@ def create_builder_graph() -> StateGraph:
         }
     )
     
-    # 3. Service Exposure (with retry loop)
+    # 7. Service Exposure → Integration Design (Parallel Phase 1 start)
+    # Note: In a true parallel implementation, both would start simultaneously
+    # For now, we run them sequentially but mark them as parallel phase
     graph.add_conditional_edges(
         "service_exposure",
         should_retry_agent,
         {
             "retry": "service_exposure",
-            "continue": "business_logic",
+            "continue": "integration_design",
         }
     )
     
-    # 4. Business Logic (with retry loop)
+    # 8. Integration Design → Parallel Phase 1 Fan-in
+    graph.add_conditional_edges(
+        "integration_design",
+        should_retry_agent,
+        {
+            "retry": "integration_design",
+            "continue": "parallel_phase_1_fanin",
+        }
+    )
+    
+    # 9. Parallel Phase 1 Fan-in → Gate 4
+    graph.add_edge("parallel_phase_1_fanin", "gate_4_service_layer")
+    
+    # 9a. Gate 4 → Error Handling or refine Integration Design
+    graph.add_conditional_edges(
+        "gate_4_service_layer",
+        lambda state: should_continue_after_gate(state, "error_handling", "integration_design"),
+        {
+            "error_handling": "error_handling",
+            "integration_design": "integration_design",
+        }
+    )
+    
+    # 10. Error Handling → Audit Logging
+    graph.add_conditional_edges(
+        "error_handling",
+        should_retry_agent,
+        {
+            "retry": "error_handling",
+            "continue": "audit_logging",
+        }
+    )
+    
+    # 11. Audit Logging → API Governance
+    graph.add_conditional_edges(
+        "audit_logging",
+        should_retry_agent,
+        {
+            "retry": "audit_logging",
+            "continue": "api_governance",
+        }
+    )
+    
+    # 12. API Governance → Parallel Phase 2 Fan-in
+    graph.add_conditional_edges(
+        "api_governance",
+        should_retry_agent,
+        {
+            "retry": "api_governance",
+            "continue": "parallel_phase_2_fanin",
+        }
+    )
+    
+    # 13. Parallel Phase 2 Fan-in → Business Logic
+    graph.add_edge("parallel_phase_2_fanin", "business_logic")
+    
+    # 14. Business Logic → Gate 5 (with retry) - CRITICAL: UI starts after this gate
     graph.add_conditional_edges(
         "business_logic",
         should_retry_agent,
         {
             "retry": "business_logic",
+            "continue": "gate_5_business_logic",
+        }
+    )
+    
+    # 14a. Gate 5 → UX Design or refine Business Logic
+    graph.add_conditional_edges(
+        "gate_5_business_logic",
+        lambda state: should_continue_after_gate(state, "ux_design", "business_logic"),
+        {
+            "ux_design": "ux_design",
+            "business_logic": "business_logic",
+        }
+    )
+    
+    # 15. UX Design → Fiori UI (Parallel Phase 3 start)
+    graph.add_conditional_edges(
+        "ux_design",
+        should_retry_agent,
+        {
+            "retry": "ux_design",
             "continue": "fiori_ui",
         }
     )
     
-    # 5. Fiori UI (with retry loop)
+    # 16. Fiori UI → Security
     graph.add_conditional_edges(
         "fiori_ui",
         should_retry_agent,
@@ -187,27 +548,100 @@ def create_builder_graph() -> StateGraph:
         }
     )
     
-    # 6. Security (with retry loop)
+    # 17. Security → Multitenancy
     graph.add_conditional_edges(
         "security",
         should_retry_agent,
         {
             "retry": "security",
+            "continue": "multitenancy",
+        }
+    )
+    
+    # 18. Multitenancy → i18n
+    graph.add_conditional_edges(
+        "multitenancy",
+        should_retry_agent,
+        {
+            "retry": "multitenancy",
+            "continue": "i18n",
+        }
+    )
+    
+    # 19. i18n → Feature Flags
+    graph.add_conditional_edges(
+        "i18n",
+        should_retry_agent,
+        {
+            "retry": "i18n",
+            "continue": "feature_flags",
+        }
+    )
+    
+    # 20. Feature Flags → Parallel Phase 3 Fan-in
+    graph.add_conditional_edges(
+        "feature_flags",
+        should_retry_agent,
+        {
+            "retry": "feature_flags",
+            "continue": "parallel_phase_3_fanin",
+        }
+    )
+    
+    # 21. Parallel Phase 3 Fan-in → Compliance Check
+    graph.add_edge("parallel_phase_3_fanin", "compliance_check")
+    
+    # 22. Compliance Check → Extension
+    graph.add_conditional_edges(
+        "compliance_check",
+        should_retry_agent,
+        {
+            "retry": "compliance_check",
             "continue": "extension",
         }
     )
     
-    # 7. Extension (with retry loop)
+    # 23. Extension → Performance Review
     graph.add_conditional_edges(
         "extension",
         should_retry_agent,
         {
             "retry": "extension",
+            "continue": "performance_review",
+        }
+    )
+    
+    # 24. Performance Review → Gate 6 (with retry)
+    graph.add_conditional_edges(
+        "performance_review",
+        should_retry_agent,
+        {
+            "retry": "performance_review",
+            "continue": "gate_6_pre_deployment",
+        }
+    )
+    
+    # 24a. Gate 6 → CI/CD or refine Performance Review
+    graph.add_conditional_edges(
+        "gate_6_pre_deployment",
+        lambda state: should_continue_after_gate(state, "ci_cd", "performance_review"),
+        {
+            "ci_cd": "ci_cd",
+            "performance_review": "performance_review",
+        }
+    )
+    
+    # 25. CI/CD → Deployment
+    graph.add_conditional_edges(
+        "ci_cd",
+        should_retry_agent,
+        {
+            "retry": "ci_cd",
             "continue": "deployment",
         }
     )
     
-    # 8. Deployment (with retry loop)
+    # 26. Deployment → Testing (Parallel Phase 4 start)
     graph.add_conditional_edges(
         "deployment",
         should_retry_agent,
@@ -217,29 +651,59 @@ def create_builder_graph() -> StateGraph:
         }
     )
     
-    # 9. Testing → Project Assembly
-    graph.add_edge("testing", "project_assembly")
-
-    # 10. Project Assembly → Project Verification
+    # 27. Testing → Documentation
+    graph.add_edge("testing", "documentation")
+    
+    # 28. Documentation → Observability
+    graph.add_edge("documentation", "observability")
+    
+    # 29. Observability → Parallel Phase 4 Fan-in
+    graph.add_edge("observability", "parallel_phase_4_fanin")
+    
+    # 30. Parallel Phase 4 Fan-in → Project Assembly
+    graph.add_edge("parallel_phase_4_fanin", "project_assembly")
+    
+    # 31. Project Assembly → Project Verification
     graph.add_edge("project_assembly", "project_verification")
-
-    # 11. Project Verification → Validation
+    
+    # 32. Project Verification → Validation
     graph.add_edge("project_verification", "validation")
-
-    # 12. Validation → self-heal back to agent OR end
+    
+    # 33. Validation → Gate 7 (with retry)
     graph.add_conditional_edges(
         "validation",
+        should_retry_agent,
+        {
+            "retry": "validation",
+            "continue": "gate_7_final_release",
+        }
+    )
+    
+    # 33a. Gate 7 → self-heal back to agent OR end
+    graph.add_conditional_edges(
+        "gate_7_final_release",
         should_self_heal,
         {
+            "enterprise_architecture": "enterprise_architecture",
+            "domain_modeling": "domain_modeling",
             "data_modeling": "data_modeling",
-            "integration": "integration",
+            "integration_design": "integration_design",
             "service_exposure": "service_exposure",
+            "error_handling": "error_handling",
             "business_logic": "business_logic",
             "fiori_ui": "fiori_ui",
             "security": "security",
+            "multitenancy": "multitenancy",
+            "compliance_check": "compliance_check",
+            "performance_review": "performance_review",
+            "deployment": "deployment",
+            "testing": "testing",
             "end": END,
         }
     )
+    
+    # 34. FAILED terminal → END
+    graph.add_edge("failed", END)
     
     return graph
 
@@ -324,11 +788,14 @@ async def run_generation_workflow_streaming(initial_state: BuilderState):
     # Get compiled graph
     graph = get_builder_graph()
     
-    # Agent order for emitting agent_start events
+    # Agent order for emitting agent_start events (28 agents total)
     AGENT_ORDER = [
-        "requirements", "enterprise_architecture", "data_modeling", "db_migration",
-        "integration", "service_exposure", "business_logic", "fiori_ui", "security",
-        "extension", "deployment", "testing", "project_assembly",
+        "requirements", "enterprise_architecture", "domain_modeling", "data_modeling",
+        "db_migration", "integration", "service_exposure", "integration_design",
+        "error_handling", "audit_logging", "api_governance", "business_logic",
+        "ux_design", "fiori_ui", "security", "multitenancy", "i18n", "feature_flags",
+        "compliance_check", "extension", "performance_review", "ci_cd", "deployment",
+        "testing", "documentation", "observability", "project_assembly",
         "project_verification", "validation",
     ]
     
@@ -361,19 +828,6 @@ async def run_generation_workflow_streaming(initial_state: BuilderState):
                             "validation_errors": node_state.get("validation_errors", []),
                             "timestamp": datetime.utcnow().isoformat(),
                         })
-                        
-                        # Emit agent_start for next agent
-                        try:
-                            current_idx = AGENT_ORDER.index(node_name)
-                            if current_idx + 1 < len(AGENT_ORDER):
-                                next_agent = AGENT_ORDER[current_idx + 1]
-                                await push_event(session_id, {
-                                    "type": "agent_start",
-                                    "agent": next_agent,
-                                    "timestamp": datetime.utcnow().isoformat(),
-                                })
-                        except ValueError:
-                            pass
             
             # Workflow completed successfully
             await push_event(session_id, {

@@ -54,9 +54,11 @@ class OpenAIProvider(LLMProvider):
     
     def get_chat_model(self, **kwargs) -> BaseChatModel:
         temperature = kwargs.pop("temperature", 0.1)
+        # Allow model override from kwargs
+        model = kwargs.pop("model", self.model)
         return ChatOpenAI(
             api_key=self.api_key,
-            model=self.model,
+            model=model,
             temperature=temperature,
             **kwargs,
         )
@@ -84,9 +86,11 @@ class GeminiProvider(LLMProvider):
             from langchain_google_genai import ChatGoogleGenerativeAI
             temperature = kwargs.pop("temperature", 0.1)
             kwargs.pop("convert_system_message_to_human", None)
+            # Allow model override from kwargs
+            model = kwargs.pop("model", self.model)
             return ChatGoogleGenerativeAI(
                 google_api_key=self.api_key,
-                model=self.model,
+                model=model,
                 temperature=temperature,
                 convert_system_message_to_human=True,
                 **kwargs,
@@ -115,9 +119,11 @@ class DeepSeekProvider(LLMProvider):
     
     def get_chat_model(self, **kwargs) -> BaseChatModel:
         temperature = kwargs.pop("temperature", 0.1)
+        # Allow model override from kwargs
+        model = kwargs.pop("model", self.model)
         return ChatOpenAI(
             api_key=self.api_key,
-            model=self.model,
+            model=model,
             base_url=self.base_url,
             temperature=temperature,
             max_tokens=8192,
@@ -145,9 +151,11 @@ class KimiProvider(LLMProvider):
     
     def get_chat_model(self, **kwargs) -> BaseChatModel:
         temperature = kwargs.pop("temperature", 0.1)
+        # Allow model override from kwargs
+        model = kwargs.pop("model", self.model)
         return ChatOpenAI(
             api_key=self.api_key,
-            model=self.model,
+            model=model,
             base_url=self.base_url,
             temperature=temperature,
             **kwargs,
@@ -173,9 +181,11 @@ class XAIProvider(LLMProvider):
 
     def get_chat_model(self, **kwargs) -> BaseChatModel:
         temperature = kwargs.pop("temperature", 0.1)
+        # Allow model override from kwargs
+        model = kwargs.pop("model", self.model)
         return ChatOpenAI(
             api_key=self.api_key,
-            model=self.model,
+            model=model,
             base_url=self.base_url,
             temperature=temperature,
             **kwargs,
@@ -202,9 +212,11 @@ class OpenRouterProvider(LLMProvider):
 
     def get_chat_model(self, **kwargs) -> BaseChatModel:
         temperature = kwargs.pop("temperature", 0.1)
+        # Allow model override from kwargs
+        model = kwargs.pop("model", self.model)
         return ChatOpenAI(
             api_key=self.api_key,
-            model=self.model,
+            model=model,
             base_url=self.base_url,
             temperature=temperature,
             default_headers={

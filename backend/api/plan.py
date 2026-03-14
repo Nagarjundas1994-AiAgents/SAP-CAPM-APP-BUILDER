@@ -122,8 +122,11 @@ async def generate_plan(
     initial_state.update(config)
     
     # Ensure LLM provider and model are explicitly set from config
-    initial_state["llm_provider"] = config.get("llm_provider", "deepseek")
-    initial_state["llm_model"] = config.get("llm_model")
+    from backend.config import get_settings
+    settings = get_settings()
+    
+    initial_state["llm_provider"] = config.get("llm_provider", settings.default_llm_provider)
+    initial_state["llm_model"] = config.get("llm_model") or settings.default_llm_model
     
     logger.info(f"Generating plan for session {session_id} with {len(initial_state.get('entities', []))} initial entities, provider={initial_state.get('llm_provider')}")
     

@@ -307,6 +307,12 @@ class BuilderState(TypedDict, total=False):
     complexity_level: str  # ComplexityLevel value — controls generation depth
 
     # -------------------------------------------------------------------------
+    # LLM Configuration (NEW)
+    # -------------------------------------------------------------------------
+    llm_provider: str | None  # User-selected LLM provider (openai, gemini, xai, etc.)
+    llm_model: str | None  # User-selected model name (grok-4-1-fast-reasoning, etc.)
+
+    # -------------------------------------------------------------------------
     # Enterprise Architecture Planning
     # -------------------------------------------------------------------------
     enterprise_blueprint: EnterpriseBlueprint
@@ -323,12 +329,55 @@ class BuilderState(TypedDict, total=False):
     current_logs: list[str]
     
     # -------------------------------------------------------------------------
-    # Self-Healing / Retry Tracking
+    # Self-Healing / Retry Tracking (UPGRADED)
     # -------------------------------------------------------------------------
-    retry_counts: dict[str, int]  # {agent_name: retry_count}
+    retry_counts: dict[str, int]  # Per-agent retry counter {"data_modeling": 2}
     correction_history: list[dict[str, Any]]  # Track what was corrected
     auto_fixed_errors: list[dict[str, Any]]  # Success stories for analytics
     needs_correction: bool  # Flag to trigger retry in workflow
+    agent_failed: bool  # True when max retries exhausted
+    MAX_RETRIES: int  # Default 3, configurable per agent
+    
+    # -------------------------------------------------------------------------
+    # Human Gate State (NEW)
+    # -------------------------------------------------------------------------
+    current_gate: str | None  # ID of gate currently waiting
+    human_feedback: str | None  # Notes from human reviewer
+    gate_decisions: dict[str, str]  # History of all gate decisions
+    
+    # -------------------------------------------------------------------------
+    # RAG / Documentation (NEW)
+    # -------------------------------------------------------------------------
+    retrieved_docs: dict[str, list]  # Docs retrieved per agent {"data_modeling": [...]}
+    validation_rules_applied: list[str]  # Rules checked during validation
+    
+    # -------------------------------------------------------------------------
+    # Parallel Phase Tracking (NEW)
+    # -------------------------------------------------------------------------
+    parallel_phase_results: dict[str, dict]  # Results from each parallel branch
+    
+    # -------------------------------------------------------------------------
+    # New Agent Outputs (NEW)
+    # -------------------------------------------------------------------------
+    domain_model: dict | None
+    integration_spec: dict | None
+    error_handling_spec: dict | None
+    audit_logging_spec: dict | None
+    api_governance_spec: dict | None
+    ux_design_spec: dict | None
+    i18n_bundles: dict | None
+    multitenancy_config: dict | None
+    feature_flags_config: dict | None
+    compliance_report: dict | None
+    performance_report: dict | None
+    ci_cd_config: dict | None
+    observability_config: dict | None
+    documentation_bundle: dict | None
+    
+    # -------------------------------------------------------------------------
+    # Model Routing (NEW)
+    # -------------------------------------------------------------------------
+    model_tier: dict[str, str]  # {"agent_name": "opus|sonnet|haiku"}
     
     # -------------------------------------------------------------------------
     # Validation Results
@@ -481,6 +530,42 @@ def create_initial_state(
         validation_retry_count=0,
         correction_agent=None,
         correction_context=None,
+        agent_failed=False,
+        MAX_RETRIES=5,
+        retry_counts={},
+        correction_history=[],
+        auto_fixed_errors=[],
+        
+        # Human Gate State
+        current_gate=None,
+        human_feedback=None,
+        gate_decisions={},
+        
+        # RAG / Documentation
+        retrieved_docs={},
+        validation_rules_applied=[],
+        
+        # Parallel Phase Tracking
+        parallel_phase_results={},
+        
+        # New Agent Outputs
+        domain_model=None,
+        integration_spec=None,
+        error_handling_spec=None,
+        audit_logging_spec=None,
+        api_governance_spec=None,
+        ux_design_spec=None,
+        i18n_bundles=None,
+        multitenancy_config=None,
+        feature_flags_config=None,
+        compliance_report=None,
+        performance_report=None,
+        ci_cd_config=None,
+        observability_config=None,
+        documentation_bundle=None,
+        
+        # Model Routing
+        model_tier={},
         
         # LLM
         llm_provider=None,

@@ -3,11 +3,14 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import WizardLayout from '@/components/WizardLayout';
-import AgentProgress from '@/components/AgentProgress';
+import AgentProgressEnhanced from '@/components/AgentProgressEnhanced';
 import PlanReview from '@/components/PlanReview';
 import ArtifactEditor from '@/components/ArtifactEditor';
 import { FioriPreview } from '@/components/FioriPreview';
 import ChatPanel, { ChatMessage } from '@/components/ChatPanel';
+import HumanGateModal from '@/components/HumanGateModal';
+import AgentDetailDrawer from '@/components/AgentDetailDrawer';
+import CostTracker from '@/components/CostTracker';
 import {
   createSession,
   updateSession,
@@ -24,6 +27,7 @@ import {
   getRegenerateStreamUrl,
   getConfig,
   getProviderModels,
+  submitGateDecision,
   Session,
   GenerationResult,
   AgentExecution,
@@ -74,19 +78,33 @@ const STEPS = [
 const AGENTS = [
   { name: 'requirements', displayName: 'Requirements Agent', description: 'Analyzing business requirements' },
   { name: 'enterprise_architecture', displayName: 'Enterprise Architecture Agent', description: 'Designing the solution blueprint' },
+  { name: 'domain_modeling', displayName: 'Domain Modeling Agent', description: 'Defining business entities' },
   { name: 'data_modeling', displayName: 'Data Modeling Agent', description: 'Generating CDS schemas' },
   { name: 'db_migration', displayName: 'DB Migration Agent', description: 'Handling DB migrations and MTX' },
   { name: 'integration', displayName: 'Integration Agent', description: 'Connecting external systems' },
-  { name: 'service_exposure', displayName: 'Service Agent', description: 'Creating OData services' },
+  { name: 'service_exposure', displayName: 'Service Exposure Agent', description: 'Creating OData services' },
+  { name: 'integration_design', displayName: 'Integration Design Agent', description: 'Designing system connectivity' },
+  { name: 'error_handling', displayName: 'Error Handling Agent', description: 'Configuring resilience patterns' },
+  { name: 'audit_logging', displayName: 'Audit Logging Agent', description: 'Setting up audit trails' },
+  { name: 'api_governance', displayName: 'API Governance Agent', description: 'Enforcing API standards' },
   { name: 'business_logic', displayName: 'Business Logic Agent', description: 'Writing event handlers' },
+  { name: 'ux_design', displayName: 'UX Design Agent', description: 'Designing Fiori layouts' },
   { name: 'fiori_ui', displayName: 'Fiori UI Agent', description: 'Building Fiori Elements app' },
   { name: 'security', displayName: 'Security Agent', description: 'Configuring authorization' },
+  { name: 'multitenancy', displayName: 'Multitenancy Agent', description: 'Setting up SaaS isolation' },
+  { name: 'i18n', displayName: 'I18n Agent', description: 'Enabling globalization' },
+  { name: 'feature_flags', displayName: 'Feature Flag Agent', description: 'Adding conditional logic' },
+  { name: 'compliance_check', displayName: 'Compliance Agent', description: 'Running SAP policy checks' },
   { name: 'extension', displayName: 'Extension Agent', description: 'Adding extension points' },
+  { name: 'performance_review', displayName: 'Performance Agent', description: 'Optimizing resource usage' },
+  { name: 'ci_cd', displayName: 'CI/CD Agent', description: 'Generating pipeline assets' },
   { name: 'deployment', displayName: 'Deployment Agent', description: 'Creating deployment config' },
   { name: 'testing', displayName: 'Testing Agent', description: 'Generating automated tests' },
+  { name: 'documentation', displayName: 'Documentation Agent', description: 'Generating technical guides' },
+  { name: 'observability', displayName: 'Observability Agent', description: 'Adding health monitoring' },
   { name: 'project_assembly', displayName: 'Project Assembly Agent', description: 'Materializing the generated workspace' },
   { name: 'project_verification', displayName: 'Project Verification Agent', description: 'Running readiness checks' },
-  { name: 'validation', displayName: 'Validation Agent', description: 'Validating SAP compliance' },
+  { name: 'validation', displayName: 'Validation Agent', description: 'Final project validation' },
 ];
 
 // Domain templates
@@ -187,6 +205,29 @@ export default function BuilderPage() {
   const [isChatProcessing, setIsChatProcessing] = useState(false);
   const [isRegenerating, setIsRegenerating] = useState(false);
   const [showChatPanel, setShowChatPanel] = useState(false);
+
+  // Human Gate Modal state
+  const [gateModalOpen, setGateModalOpen] = useState(false);
+  const [currentGate, setCurrentGate] = useState<any>(null);
+
+  // Agent Detail Drawer state
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [selectedAgent, setSelectedAgent] = useState<any>(null);
+  const [selectedExecution, setSelectedExecution] = useState<AgentExecution | null>(null);
+
+  // Cost Tracker state
+  const [costData, setCostData] = useState({
+    totalTokens: 0,
+    sonnetTokens: 0,
+    haikuTokens: 0,
+    estimatedCost: 0,
+    agentCosts: [] as Array<{
+      agent_name: string;
+      tokens: number;
+      cost: number;
+      model_tier: 'sonnet' | 'haiku';
+    }>
+  });
 
   // Form state
   const [projectName, setProjectName] = useState('');
@@ -444,19 +485,19 @@ export default function BuilderPage() {
             setAgentHistory(data.agent_history);
             setValidationErrors(data.validation_errors || []);
             
-            // Set next agent as current if available
-            const currentIndex = AGENTS.findIndex(a => a.name === data.agent);
-            if (currentIndex !== -1 && currentIndex < AGENTS.length - 1) {
-              const nextPending = data.agent_history.find((a: any) => a.status === 'pending');
-              if (nextPending) {
-                setCurrentAgent(nextPending.agent_name);
-              } else {
-                // FALLBACK: use hardcoded order if pending not found in history
-                setCurrentAgent(AGENTS[currentIndex + 1].name);
-              }
-            } else {
-              setCurrentAgent(null);
-            }
+            // Just clear current agent, next agent will be set by agent_start event
+            setCurrentAgent(null);
+          } else if (data.type === 'human_gate_pending') {
+            // Human gate triggered - show modal
+            console.log('🚪 Human gate triggered:', data.gate_name, data);
+            setCurrentGate({
+              gate_id: data.gate_id,
+              gate_name: data.gate_name,
+              context: data.context,
+              session_id: session.id
+            });
+            setGateModalOpen(true);
+            console.log('✅ Gate modal opened');
           } else if (data.type === 'workflow_complete') {
             console.log('Workflow complete, closing stream');
             eventSource.close();
@@ -491,6 +532,28 @@ export default function BuilderPage() {
     } catch (error) {
       console.error('Streaming generation failed:', error);
       setIsGenerating(false);
+    }
+  };
+
+  // Handle gate decision
+  const handleGateDecision = async (decision: 'approve' | 'refine', refinementNotes?: string, targetAgent?: string) => {
+    if (!session || !currentGate) return;
+
+    try {
+      await submitGateDecision(
+        session.id,
+        currentGate.gate_id,
+        decision,
+        refinementNotes,
+        targetAgent
+      );
+
+      // Close modal and continue generation
+      setGateModalOpen(false);
+      setCurrentGate(null);
+    } catch (error) {
+      console.error('Failed to submit gate decision:', error);
+      throw error;
     }
   };
 
@@ -1165,7 +1228,7 @@ export default function BuilderPage() {
           <div className="space-y-6">
             {isGenerating ? (
               <div className="grid lg:grid-cols-2 gap-8 items-start">
-                <AgentProgress
+                <AgentProgressEnhanced
                   agents={AGENTS}
                   executions={agentHistory}
                   currentAgent={currentAgent}
@@ -1396,17 +1459,60 @@ export default function BuilderPage() {
   };
 
   return (
-    <WizardLayout
-      steps={STEPS}
-      currentStep={currentStep}
-      onStepChange={setCurrentStep}
-      onNext={handleNext}
-      onPrevious={handlePrevious}
-      canProceed={canProceed()}
-      isGenerating={isGenerating}
-      isFullWidth={currentStep === 8 || currentStep === 9}
-    >
-      {renderStepContent()}
-    </WizardLayout>
+    <>
+      <WizardLayout
+        steps={STEPS}
+        currentStep={currentStep}
+        onStepChange={setCurrentStep}
+        onNext={handleNext}
+        onPrevious={handlePrevious}
+        canProceed={canProceed()}
+        isGenerating={isGenerating}
+        isFullWidth={currentStep === 8 || currentStep === 9}
+      >
+        {renderStepContent()}
+      </WizardLayout>
+
+      {/* Human Gate Modal */}
+      <HumanGateModal
+        isOpen={gateModalOpen}
+        onClose={() => setGateModalOpen(false)}
+        gateData={currentGate}
+        onDecision={handleGateDecision}
+      />
+
+      {/* Agent Detail Drawer */}
+      <AgentDetailDrawer
+        isOpen={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        agent={selectedAgent}
+        execution={selectedExecution}
+        modelTier={selectedAgent ? (
+          ['enterprise_architecture', 'domain_modeling', 'business_logic', 'validation', 'security', 'compliance_check'].includes(selectedAgent.name)
+            ? 'sonnet'
+            : 'haiku'
+        ) : 'haiku'}
+        ragDocs={[]}
+        validationRules={[]}
+        tokenUsage={selectedExecution ? {
+          input: 0,
+          output: 0,
+          total: 0,
+          cost: 0
+        } : undefined}
+      />
+
+      {/* Cost Tracker */}
+      {session && isGenerating && (
+        <CostTracker
+          sessionId={session.id}
+          totalTokens={costData.totalTokens}
+          sonnetTokens={costData.sonnetTokens}
+          haikuTokens={costData.haikuTokens}
+          estimatedCost={costData.estimatedCost}
+          agentCosts={costData.agentCosts}
+        />
+      )}
+    </>
   );
 }

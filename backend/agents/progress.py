@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 # Module-level queue storage  (one queue per active session)
 # ---------------------------------------------------------------------------
 _queues: dict[str, asyncio.Queue] = {}
+_started_agents: dict[str, set[str]] = {}
 
 
 def create_progress_queue(session_id: str) -> asyncio.Queue:
@@ -33,6 +34,7 @@ def get_progress_queue(session_id: str) -> asyncio.Queue | None:
 def remove_progress_queue(session_id: str) -> None:
     """Remove and clean up a session's progress queue."""
     _queues.pop(session_id, None)
+    _started_agents.pop(session_id, None)
     logger.info(f"Progress queue removed for session {session_id}")
 
 
@@ -65,6 +67,18 @@ def log_progress(state: dict, message: str) -> None:
     q = _queues.get(session_id)
     if q is not None:
         try:
+            # Emit agent_start if this is the first log for this agent in this session
+            if session_id not in _started_agents:
+                _started_agents[session_id] = set()
+            
+            if agent_name not in _started_agents[session_id]:
+                _started_agents[session_id].add(agent_name)
+                q.put_nowait({
+                    "type": "agent_start",
+                    "agent": agent_name,
+                    "timestamp": datetime.utcnow().isoformat(),
+                })
+
             q.put_nowait({
                 "type": "agent_log",
                 "agent": agent_name,

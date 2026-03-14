@@ -17,6 +17,7 @@ from typing import Any
 from backend.agents.llm_providers import get_llm_manager
 from backend.agents.state import BuilderState
 from backend.agents.progress import log_progress
+from backend.agents.model_router import get_model_for_agent, get_model_tier_name
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ async def generate_with_retry(
     system_prompt: str,
     state: BuilderState,
     required_keys: list[str] | None = None,
-    max_retries: int = 3,
+    max_retries: int = 5,
     agent_name: str = "agent",
 ) -> dict | None:
     """
@@ -97,16 +98,25 @@ async def generate_with_retry(
         Parsed JSON dict or None if all attempts fail
     """
     llm_manager = get_llm_manager()
+    
+    # IMPORTANT: Use the user's selected provider and model from state
     provider = state.get("llm_provider")
+    user_model = state.get("llm_model")  # User's selected model from frontend
+    
     last_error = None
+    
+    # Get tier name for logging (Strategic vs Efficient)
+    tier_name = get_model_tier_name(agent_name)
+    
+    # Store model tier in state for tracking
+    if "model_tier" not in state:
+        state["model_tier"] = {}
+    state["model_tier"][agent_name] = tier_name
     
     # Determine the actual provider and model name for logging
     actual_provider = provider or llm_manager.settings.default_llm_provider
-    try:
-        model_name = llm_manager.get_provider(actual_provider).model
-    except Exception:
-        model_name = "unknown"
-    model_tag = f"[{actual_provider}/{model_name}]"
+    model_name = user_model or "default"
+    model_tag = f"[{actual_provider}/{tier_name}/{model_name}]"
 
     # Inject complexity-level instructions into the prompt
     complexity_instructions = get_complexity_prompt(state)
@@ -114,10 +124,12 @@ async def generate_with_retry(
 
     for attempt in range(max_retries):
         try:
+            # Use the user's selected model - NO OVERRIDE
             response = await llm_manager.generate(
                 prompt=current_prompt,
                 system_prompt=system_prompt,
                 provider=provider,
+                model=user_model,  # Pass user's model directly
                 temperature=0.1 if attempt == 0 else 0.05,
             )
 

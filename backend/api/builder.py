@@ -67,6 +67,27 @@ class GenerationResult(BaseModel):
     generated_manifest: dict[str, Any] | None = None
 
 
+class GateDecisionRequest(BaseModel):
+    """Request to make a gate decision."""
+    decision: str = Field(..., description="Decision: 'approved' or 'refine'")
+    notes: str = Field(default="", description="Optional notes from reviewer")
+    target_agent: str | None = Field(default=None, description="Agent to refine (if decision is 'refine')")
+
+
+class GateDecisionResponse(BaseModel):
+    """Response after gate decision."""
+    status: str
+    next_agent: str | None
+
+
+class CurrentGateResponse(BaseModel):
+    """Current gate status."""
+    gate_id: str | None
+    gate_name: str | None
+    context: dict[str, Any] | None
+    waiting_since: str | None
+
+
 # =============================================================================
 # Routes
 # =============================================================================
@@ -514,4 +535,121 @@ This project was generated using the SAP CAPM + Fiori App Builder Platform.
         zip_buffer,
         media_type="application/zip",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+# =============================================================================
+# Human Gate Endpoints
+# =============================================================================
+
+@router.post("/{session_id}/gate/{gate_id}/decision", response_model=GateDecisionResponse)
+async def submit_gate_decision(
+    session_id: str,
+    gate_id: str,
+    request: GateDecisionRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Submit a decision for a human gate.
+    
+    This unblocks the workflow that is waiting at the gate.
+    """
+    from backend.agents.human_gate import set_gate_decision, get_gate_event
+    
+    # Verify session exists
+    result = await db.execute(select(Session).where(Session.id == session_id))
+    session = result.scalar_one_or_none()
+    
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {session_id} not found",
+        )
+    
+    # Check if gate is waiting
+    event = get_gate_event(session_id, gate_id)
+    if not event:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Gate {gate_id} is not currently waiting for a decision",
+        )
+    
+    # Validate decision
+    if request.decision not in ["approved", "refine"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Decision must be 'approved' or 'refine'",
+        )
+    
+    # Set the decision
+    decision = {
+        "decision": request.decision,
+        "notes": request.notes,
+        "target_agent": request.target_agent,
+    }
+    set_gate_decision(session_id, gate_id, decision)
+    
+    logger.info(f"Gate {gate_id} decision submitted for session {session_id}: {request.decision}")
+    
+    next_agent = "continue" if request.decision == "approved" else request.target_agent
+    
+    return GateDecisionResponse(
+        status="ok",
+        next_agent=next_agent,
+    )
+
+
+@router.get("/{session_id}/gate/current", response_model=CurrentGateResponse)
+async def get_current_gate(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get the current gate that is waiting for a decision.
+    """
+    # Verify session exists
+    result = await db.execute(select(Session).where(Session.id == session_id))
+    session = result.scalar_one_or_none()
+    
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {session_id} not found",
+        )
+    
+    config = session.configuration or {}
+    current_gate = config.get("current_gate")
+    
+    if not current_gate:
+        return CurrentGateResponse(
+            gate_id=None,
+            gate_name=None,
+            context=None,
+            waiting_since=None,
+        )
+    
+    # Get gate context from agent history
+    agent_history = config.get("agent_history", [])
+    gate_decisions = config.get("gate_decisions", {})
+    
+    # Map gate IDs to names
+    gate_names = {
+        "gate_1_requirements": "Gate 1: Requirements Sign-off",
+        "gate_2_architecture": "Gate 2: Architecture Sign-off",
+        "gate_3_data_layer": "Gate 3: Data Layer Sign-off",
+        "gate_4_service_layer": "Gate 4: Service Layer Sign-off",
+        "gate_5_business_logic": "Gate 5: Business Logic Sign-off",
+        "gate_6_pre_deployment": "Gate 6: Pre-deployment Sign-off",
+        "gate_7_final_release": "Gate 7: Final Release Sign-off",
+    }
+    
+    return CurrentGateResponse(
+        gate_id=current_gate,
+        gate_name=gate_names.get(current_gate, current_gate),
+        context={
+            "agent_history": agent_history[-5:] if agent_history else [],  # Last 5 agents
+            "validation_errors": config.get("validation_errors", []),
+            "gate_decisions": gate_decisions,
+        },
+        waiting_since=config.get("updated_at"),
     )

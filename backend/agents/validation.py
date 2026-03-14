@@ -23,6 +23,7 @@ from backend.agents.state import (
     GenerationStatus,
 )
 from backend.agents.progress import log_progress
+from backend.rag.rule_extractor import check_all_rules, get_all_rules
 
 logger = logging.getLogger(__name__)
 
@@ -505,6 +506,31 @@ async def validation_agent(state: BuilderState) -> BuilderState:
         log_progress(state, f"LLM validation failed ({str(e)[:80]}). Using rules only.")
 
     # ==========================================================================
+    # Deterministic Rule Checklist (NEW - from RAG module)
+    # ==========================================================================
+    log_progress(state, "Running deterministic rule checklist...")
+    rule_results = check_all_rules(state)
+    
+    # Store rule results in state
+    state["validation_rules_applied"] = [r["rule"] for r in rule_results]
+    
+    # Convert failed rules to validation errors
+    for rule_result in rule_results:
+        if not rule_result["passed"]:
+            all_errors.append({
+                "agent": "validation",
+                "code": rule_result["rule"],
+                "message": f"{rule_result['description']} - {rule_result['evidence']}",
+                "field": rule_result["category"],
+                "severity": "error",
+                "responsible_agent": rule_result["category"],
+            })
+    
+    failed_rules = [r for r in rule_results if not r["passed"]]
+    passed_rules = [r for r in rule_results if r["passed"]]
+    log_progress(state, f"Rule checklist: {len(passed_rules)}/{len(rule_results)} rules passed")
+    
+    # ==========================================================================
     # Rule-based validation (always runs)
     # ==========================================================================
     log_progress(state, "Running rule-based validation checks...")
@@ -530,7 +556,7 @@ async def validation_agent(state: BuilderState) -> BuilderState:
     warning_count = sum(1 for e in all_errors if e.get("severity") == "warning")
 
     retry_count = state.get("validation_retry_count", 0)
-    max_retries = 2  # Maximum self-healing loops
+    max_retries = 5  # Maximum self-healing loops
 
     if error_count > 0 and retry_count < max_retries:
         corrections = _build_correction_context(state, all_errors)

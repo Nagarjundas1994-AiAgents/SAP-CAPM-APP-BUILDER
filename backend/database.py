@@ -28,7 +28,13 @@ engine = create_async_engine(
     echo=settings.debug,
     future=True,
     # SQLite specific settings
-    connect_args={"check_same_thread": False} if settings.is_sqlite else {},
+    connect_args={
+        "check_same_thread": False,
+        "timeout": 30,  # Increase timeout to 30 seconds
+    } if settings.is_sqlite else {},
+    # Pool settings to prevent premature connection closure
+    pool_pre_ping=True,  # Verify connections before using
+    pool_recycle=3600,  # Recycle connections after 1 hour
 )
 
 # Session factory
@@ -58,12 +64,20 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
     session = async_session_factory()
     try:
         yield session
-        await session.commit()
+        # Only commit if session is still active
+        if session.is_active:
+            await session.commit()
     except Exception:
-        await session.rollback()
+        # Only rollback if session is still active
+        if session.is_active:
+            await session.rollback()
         raise
     finally:
-        await session.close()
+        # Always close, but handle if already closed
+        try:
+            await session.close()
+        except Exception:
+            pass  # Session already closed, ignore
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
