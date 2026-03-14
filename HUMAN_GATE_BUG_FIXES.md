@@ -305,6 +305,144 @@ Gate 7 is the **Final Release Sign-off** - it's the last checkpoint before deplo
 
 ---
 
-**Status:** ✅ All 4 bugs fixed and ready for production!
+**Status:** ✅ All 5 bugs fixed and ready for production!
 
-**Last Updated:** 2025-01-XX
+**Last Updated:** 2025-03-14
+
+---
+
+## Bug #5: UI Shows "0 files" Despite Successful Generation ✅ FIXED
+
+### Problem
+After Gate 7 approval, the UI displays "0 files" for all artifact categories (Database, Services, UI, Deployment, Docs) even though:
+- Files ARE generated on disk (53 files in workspace)
+- Session status is correctly set to `'completed'` (after Bug #4 fix)
+- Project assembly agent ran successfully
+- Download endpoint returns `400 Bad Request`
+
+### Symptoms
+- UI shows "0 files" for all categories
+- Download button fails with 400 error
+- Files exist in workspace directory
+- `get_artifacts()` API returns empty arrays
+- Database configuration has artifact keys but with empty arrays
+
+### Root Cause
+When using human gates with streaming workflow, the artifacts are accumulated in the state during agent execution, but they are only persisted to the database when the `workflow_complete` event is emitted. However, if the workflow is interrupted, paused, or doesn't reach the normal completion path, the artifacts remain in memory but are never saved to the database.
+
+The `get_artifacts()` endpoint reads from `session.configuration` in the database:
+```python
+return GenerationResult(
+    artifacts_db=[ArtifactPreview(**a) for a in config.get("artifacts_db", [])],
+    artifacts_srv=[ArtifactPreview(**a) for a in config.get("artifacts_srv", [])],
+    # ... etc
+)
+```
+
+If the configuration was never updated with the artifacts from state, these arrays remain empty.
+
+### Fix Location
+**File:** `backend/agents/human_gate.py`
+
+**Changes:**
+
+1. **Added persistence function:**
+```python
+async def _persist_artifacts_to_db(session_id: str, state: BuilderState) -> None:
+    """
+    Persist artifacts from state to database configuration.
+    
+    This is called when Gate 7 is approved to ensure artifacts are saved
+    even if the workflow doesn't emit a workflow_complete event.
+    """
+    try:
+        from backend.database import get_async_session_context
+        from backend.models import Session
+        from sqlalchemy import select
+        
+        async with get_async_session_context() as db:
+            result = await db.execute(select(Session).where(Session.id == session_id))
+            session = result.scalar_one_or_none()
+            
+            if not session:
+                logger.error(f"Session {session_id} not found - cannot persist artifacts")
+                return
+            
+            config = session.configuration or {}
+            
+            # Keys to sync from state to database
+            keys_to_sync = [
+                "entities", "relationships", "business_rules",
+                "artifacts_db", "artifacts_srv", "artifacts_app",
+                "artifacts_deployment", "artifacts_docs",
+                "agent_history", "validation_errors",
+                "enterprise_blueprint", "service_modules", "ui_apps",
+                "quality_gates", "generated_workspace_path", "generated_manifest",
+                "verification_checks", "verification_summary"
+            ]
+            
+            # Update configuration with state values
+            for key in keys_to_sync:
+                val = state.get(key)
+                if val is not None:  # Include empty lists/dicts
+                    config[key] = val
+            
+            session.configuration = config
+            session.status = state.get("generation_status", "completed")
+            session.completed_at = datetime.utcnow()
+            
+            await db.commit()
+            
+            # Log artifact counts for debugging
+            artifact_counts = {
+                "db": len(config.get("artifacts_db", [])),
+                "srv": len(config.get("artifacts_srv", [])),
+                "app": len(config.get("artifacts_app", [])),
+                "deployment": len(config.get("artifacts_deployment", [])),
+                "docs": len(config.get("artifacts_docs", [])),
+            }
+            total = sum(artifact_counts.values())
+            logger.info(f"Persisted {total} artifacts to database for session {session_id}: {artifact_counts}")
+            logger.info(f"Workspace path: {config.get('generated_workspace_path', 'NOT SET')}")
+            
+    except Exception as e:
+        logger.error(f"Failed to persist artifacts to database: {e}", exc_info=True)
+```
+
+2. **Call persistence when Gate 7 is approved:**
+```python
+if gate_id == "gate_7_final_release":
+    from backend.agents.state import GenerationStatus
+    state["generation_status"] = GenerationStatus.COMPLETED.value
+    logger.info(f"Gate 7 approved - setting generation_status to COMPLETED")
+    
+    # BUG FIX #5: Persist artifacts to database when Gate 7 is approved
+    await _persist_artifacts_to_db(session_id, state)
+```
+
+### Impact
+- Artifacts are immediately persisted to database when Gate 7 is approved
+- UI correctly displays file counts for all categories
+- Download endpoint works correctly
+- No dependency on `workflow_complete` event for artifact persistence
+- Works reliably with human gates and streaming workflows
+
+### Verification
+After the fix, when Gate 7 is approved:
+1. Check logs for: `Persisted X artifacts to database for session {session_id}`
+2. Verify artifact counts in logs match actual files generated
+3. UI should display correct file counts immediately
+4. Download button should work without 400 error
+5. Database `session.configuration` should contain all artifact arrays
+
+### Related Issues
+- Streaming workflow state persistence
+- Human gate workflow completion
+- Database synchronization with in-memory state
+- Frontend artifact display
+
+---
+
+**Status:** ✅ All 5 bugs fixed and ready for production!
+
+**Last Updated:** 2025-03-14

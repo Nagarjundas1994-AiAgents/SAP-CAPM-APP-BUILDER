@@ -82,6 +82,67 @@ def get_active_gate(session_id: str) -> dict | None:
     return _active_human_gates.get(session_id)
 
 
+async def _persist_artifacts_to_db(session_id: str, state: BuilderState) -> None:
+    """
+    Persist artifacts from state to database configuration.
+    
+    This is called when Gate 7 is approved to ensure artifacts are saved
+    even if the workflow doesn't emit a workflow_complete event.
+    """
+    try:
+        from backend.database import get_async_session_context
+        from backend.models import Session
+        from sqlalchemy import select
+        
+        async with get_async_session_context() as db:
+            result = await db.execute(select(Session).where(Session.id == session_id))
+            session = result.scalar_one_or_none()
+            
+            if not session:
+                logger.error(f"Session {session_id} not found - cannot persist artifacts")
+                return
+            
+            config = session.configuration or {}
+            
+            # Keys to sync from state to database
+            keys_to_sync = [
+                "entities", "relationships", "business_rules",
+                "artifacts_db", "artifacts_srv", "artifacts_app",
+                "artifacts_deployment", "artifacts_docs",
+                "agent_history", "validation_errors",
+                "enterprise_blueprint", "service_modules", "ui_apps",
+                "quality_gates", "generated_workspace_path", "generated_manifest",
+                "verification_checks", "verification_summary"
+            ]
+            
+            # Update configuration with state values
+            for key in keys_to_sync:
+                val = state.get(key)
+                if val is not None:  # Include empty lists/dicts
+                    config[key] = val
+            
+            session.configuration = config
+            session.status = state.get("generation_status", "completed")
+            session.completed_at = datetime.utcnow()
+            
+            await db.commit()
+            
+            # Log artifact counts for debugging
+            artifact_counts = {
+                "db": len(config.get("artifacts_db", [])),
+                "srv": len(config.get("artifacts_srv", [])),
+                "app": len(config.get("artifacts_app", [])),
+                "deployment": len(config.get("artifacts_deployment", [])),
+                "docs": len(config.get("artifacts_docs", [])),
+            }
+            total = sum(artifact_counts.values())
+            logger.info(f"Persisted {total} artifacts to database for session {session_id}: {artifact_counts}")
+            logger.info(f"Workspace path: {config.get('generated_workspace_path', 'NOT SET')}")
+            
+    except Exception as e:
+        logger.error(f"Failed to persist artifacts to database: {e}", exc_info=True)
+
+
 async def human_gate(
     state: BuilderState,
     gate_id: str,
@@ -206,6 +267,10 @@ async def human_gate(
             from backend.agents.state import GenerationStatus
             state["generation_status"] = GenerationStatus.COMPLETED.value
             logger.info(f"Gate 7 approved - setting generation_status to COMPLETED")
+            
+            # BUG FIX #5: Persist artifacts to database when Gate 7 is approved
+            # This ensures artifacts are available even if workflow_complete event is not emitted
+            await _persist_artifacts_to_db(session_id, state)
         
         # Emit gate approved event
         await push_event(session_id, {
