@@ -230,29 +230,30 @@ async def stream_generation(
                     s = res.scalar_one()
                     
                     final_state = event.get("final_state", {})
+                    config = s.configuration or {}
+                    
+                    # Merge logic: prioritize final_state but keep existing configuration keys if needed
+                    updated_config = {**config}
+                    
+                    # Keys to sync from final_state
+                    keys_to_sync = [
+                        "entities", "relationships", "business_rules", "artifacts_db",
+                        "artifacts_srv", "artifacts_app", "artifacts_deployment", "artifacts_docs",
+                        "agent_history", "validation_errors", "enterprise_blueprint",
+                        "service_modules", "ui_apps", "quality_gates", 
+                        "generated_workspace_path", "generated_manifest",
+                        "verification_checks", "verification_summary"
+                    ]
+                    
+                    for key in keys_to_sync:
+                        val = final_state.get(key)
+                        # Only update if the value is truthy (not empty list/dict/None) 
+                        # or if it's the first time we're writing it.
+                        if val or key not in updated_config:
+                            updated_config[key] = val
                     
                     s.status = final_state.get("generation_status", "completed")
-                    s.configuration = {
-                        **(s.configuration or {}),
-                        "entities": final_state.get("entities", []),
-                        "relationships": final_state.get("relationships", []),
-                        "business_rules": final_state.get("business_rules", []),
-                        "artifacts_db": final_state.get("artifacts_db", []),
-                        "artifacts_srv": final_state.get("artifacts_srv", []),
-                        "artifacts_app": final_state.get("artifacts_app", []),
-                        "artifacts_deployment": final_state.get("artifacts_deployment", []),
-                        "artifacts_docs": final_state.get("artifacts_docs", []),
-                        "agent_history": final_state.get("agent_history", []),
-                        "validation_errors": final_state.get("validation_errors", []),
-                        "enterprise_blueprint": final_state.get("enterprise_blueprint", {}),
-                        "service_modules": final_state.get("service_modules", []),
-                        "ui_apps": final_state.get("ui_apps", []),
-                        "quality_gates": final_state.get("quality_gates", []),
-                        "generated_workspace_path": final_state.get("generated_workspace_path"),
-                        "generated_manifest": final_state.get("generated_manifest"),
-                        "verification_checks": final_state.get("verification_checks", []),
-                        "verification_summary": final_state.get("verification_summary"),
-                    }
+                    s.configuration = updated_config
                     s.completed_at = datetime.utcnow()
                     await db.commit()
                     logger.info(f"Streaming generation completed and saved for session {session_id}")

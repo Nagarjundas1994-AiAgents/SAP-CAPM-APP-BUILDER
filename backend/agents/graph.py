@@ -340,9 +340,12 @@ async def run_generation_workflow_streaming(initial_state: BuilderState):
         nonlocal final_state, workflow_error
         try:
             last_agent_idx = -1
+            final_state = initial_state.copy()
             async for event in graph.astream(initial_state):
-                for node_name, node_state in event.items():
-                    final_state = node_state
+                for node_name, node_output in event.items():
+                    # Update accumulated state with node output instead of overwriting
+                    final_state.update(node_output)
+                    node_state = node_output # Legacy reference for the rest of the loop
                     
                     # Emit agent_start for the NEXT agent if applicable
                     agent_history = node_state.get("agent_history", [])
