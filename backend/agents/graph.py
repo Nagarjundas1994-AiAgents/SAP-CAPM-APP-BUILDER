@@ -146,7 +146,18 @@ def should_continue_after_gate(state: BuilderState, next_node: str, refine_node:
         next_node if approved, refine_node if refinement requested
     """
     if state.get("needs_correction"):
-        correction_agent = state.get("correction_agent", refine_node)
+        correction_agent = state.get("correction_agent")
+        
+        # BUG FIX #3: Validate correction_agent matches expected refine_node
+        # If correction_agent is set but doesn't match refine_node, use refine_node as fallback
+        if correction_agent and correction_agent != refine_node:
+            logger.warning(f"Gate correction_agent '{correction_agent}' doesn't match expected refine_node '{refine_node}'. "
+                          f"Using refine_node as fallback to avoid routing errors.")
+            correction_agent = refine_node
+        elif not correction_agent:
+            # If correction_agent is None, default to refine_node
+            correction_agent = refine_node
+        
         logger.info(f"Gate refinement: routing to {correction_agent}")
         return correction_agent
     

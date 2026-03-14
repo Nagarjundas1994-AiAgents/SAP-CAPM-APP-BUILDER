@@ -3,6 +3,16 @@ Human-in-the-Loop Gates
 
 Pauses workflow execution for human review and approval.
 Uses asyncio.Event for non-blocking wait mechanism.
+
+⚠️ KNOWN ISSUE - Multi-Process Deployment:
+If running with multiple workers (Gunicorn, uvicorn --workers > 1), the in-memory
+asyncio.Event will NOT work across processes. The API call to set_gate_decision()
+may land on a different worker than the one waiting on event.wait().
+
+SOLUTION for production: Replace in-memory events with Redis pub/sub:
+- Store decisions in Redis with TTL
+- Use Redis pub/sub channels to signal gate completion
+- See Bug #2 fix in the issue tracker for implementation details
 """
 
 import asyncio
@@ -18,6 +28,7 @@ logger = logging.getLogger(__name__)
 # Global registry of gate events
 _gate_events: dict[str, asyncio.Event] = {}
 _gate_decisions: dict[str, dict] = {}
+_active_human_gates: dict[str, dict] = {}
 
 
 def create_gate_event(session_id: str, gate_id: str) -> asyncio.Event:
@@ -36,13 +47,20 @@ def get_gate_event(session_id: str, gate_id: str) -> asyncio.Event | None:
 
 def set_gate_decision(session_id: str, gate_id: str, decision: dict) -> None:
     """Store a gate decision."""
+    import os
     key = f"{session_id}:{gate_id}"
     _gate_decisions[key] = decision
+    
+    # BUG FIX #2: Add diagnostic logging
+    logger.info(f"[GATE DEBUG] set_gate_decision called for {gate_id} on pid={os.getpid()}, decision={decision.get('decision')}")
     
     # Set the event to unblock the waiting gate
     event = get_gate_event(session_id, gate_id)
     if event:
         event.set()
+        logger.info(f"[GATE DEBUG] Event set successfully for {gate_id}")
+    else:
+        logger.error(f"[GATE DEBUG] No event found for {gate_id} - possible multi-process issue!")
 
 
 def get_gate_decision(session_id: str, gate_id: str) -> dict | None:
@@ -56,6 +74,12 @@ def clear_gate(session_id: str, gate_id: str) -> None:
     key = f"{session_id}:{gate_id}"
     _gate_events.pop(key, None)
     _gate_decisions.pop(key, None)
+    _active_human_gates.pop(session_id, None)
+
+
+def get_active_gate(session_id: str) -> dict | None:
+    """Get the currently active gate for a session from the global registry."""
+    return _active_human_gates.get(session_id)
 
 
 async def human_gate(
@@ -101,8 +125,22 @@ async def human_gate(
         "waiting_since": now,
     }
     
+    # Create event for this gate BEFORE emitting pending event to avoid race conditions
+    # if the user submits a decision via API immediately after seeing the log/event.
+    event = create_gate_event(session_id, gate_id)
+    
+    # Register this gate globally for polling reliability
+    _active_human_gates[session_id] = {
+        "gate_id": gate_id,
+        "gate_name": gate_name,
+        "context": context,
+        "waiting_since": now,
+    }
+    
     # Emit human_gate_pending event
     log_progress(state, f"⏸ {gate_name} - Waiting for human review...")
+    logger.info(f"Gate {gate_id} event created and registered, sending pending notification to frontend.")
+    
     await push_event(session_id, {
         "type": "human_gate_pending",
         "gate_id": gate_id,
@@ -111,14 +149,20 @@ async def human_gate(
         "timestamp": now,
     })
     
-    # Create event for this gate
-    event = create_gate_event(session_id, gate_id)
-    
     # Wait for decision with timeout
     timeout_seconds = timeout_hours * 3600
+    
+    # BUG FIX #2: Add diagnostic logging for multi-process debugging
+    import os
+    logger.info(f"[GATE DEBUG] {gate_id} waiting. needs_correction={state.get('needs_correction')}, "
+                f"correction_agent={state.get('correction_agent')}, worker_pid={os.getpid()}")
+    
     try:
         await asyncio.wait_for(event.wait(), timeout=timeout_seconds)
+        logger.info(f"[GATE DEBUG] {gate_id} unblocked successfully on pid={os.getpid()}")
     except asyncio.TimeoutError:
+        logger.error(f"[GATE DEBUG] {gate_id} TIMED OUT after {timeout_hours} hours. "
+                    f"Was set_gate_decision ever called on pid={os.getpid()}?")
         logger.warning(f"Gate {gate_id} timed out after {timeout_hours} hours")
         log_progress(state, f"⚠️ {gate_name} timed out - workflow paused")
         
@@ -152,6 +196,16 @@ async def human_gate(
         log_progress(state, f"✅ {gate_name} approved - continuing workflow")
         state["current_gate"] = None
         state["human_feedback"] = None
+        state["needs_correction"] = False  # BUG FIX #1: Reset correction flag
+        state["correction_agent"] = None  # BUG FIX #1: Clear correction agent
+        state["correction_context"] = None  # BUG FIX #1: Clear correction context
+        
+        # BUG FIX #4: Reset generation_status to COMPLETED if Gate 7 is approved
+        # Gate 7 is the final release gate - if approved, the workflow should complete successfully
+        if gate_id == "gate_7_final_release":
+            from backend.agents.state import GenerationStatus
+            state["generation_status"] = GenerationStatus.COMPLETED.value
+            logger.info(f"Gate 7 approved - setting generation_status to COMPLETED")
         
         # Emit gate approved event
         await push_event(session_id, {

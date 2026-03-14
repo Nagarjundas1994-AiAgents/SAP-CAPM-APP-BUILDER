@@ -18,6 +18,7 @@ from backend.database import get_db
 from backend.models import Session
 from backend.agents.state import create_initial_state, BuilderState
 from backend.agents.graph import run_generation_workflow
+from backend.agents.human_gate import get_active_gate, set_gate_decision, get_gate_event
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -554,8 +555,6 @@ async def submit_gate_decision(
     
     This unblocks the workflow that is waiting at the gate.
     """
-    from backend.agents.human_gate import set_gate_decision, get_gate_event
-    
     # Verify session exists
     result = await db.execute(select(Session).where(Session.id == session_id))
     session = result.scalar_one_or_none()
@@ -617,6 +616,17 @@ async def get_current_gate(
             detail=f"Session {session_id} not found",
         )
     
+    # First check the global active gate registry (real-time source)
+    active_gate = get_active_gate(session_id)
+    if active_gate:
+        return CurrentGateResponse(
+            gate_id=active_gate["gate_id"],
+            gate_name=active_gate["gate_name"],
+            context=active_gate["context"],
+            waiting_since=active_gate["waiting_since"],
+        )
+
+    # Fallback to session configuration (persisted source)
     config = session.configuration or {}
     current_gate = config.get("current_gate")
     

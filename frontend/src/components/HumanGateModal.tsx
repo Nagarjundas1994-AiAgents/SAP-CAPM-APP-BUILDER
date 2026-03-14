@@ -97,9 +97,11 @@ export default function HumanGateModal({
     }
   };
 
+  console.log('Rendering HumanGateModal, isOpen:', isOpen, 'gateData:', gateData?.gate_id);
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-      <div className="bg-gray-900 border border-blue-500/30 rounded-2xl shadow-2xl max-w-3xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/70 backdrop-blur-md overflow-hidden">
+      <div className="bg-gray-900 border border-blue-500/40 rounded-2xl shadow-2xl max-w-3xl w-full max-h-[90vh] flex flex-col opacity-100 scale-100 transition-all duration-200">
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-white/10">
           <div className="flex items-center gap-3">

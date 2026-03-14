@@ -28,6 +28,7 @@ import {
   getConfig,
   getProviderModels,
   submitGateDecision,
+  getCurrentGate,
   Session,
   GenerationResult,
   AgentExecution,
@@ -341,6 +342,31 @@ export default function BuilderPage() {
     const recommendedModel = availableModels.find((model) => model.recommended) ?? availableModels[0];
     setLlmModel(recommendedModel.id);
   }, [availableModels, llmModel]);
+  
+  // Polling fallback for Human Gates (ensures visibility even if SSE is unreliable)
+  useEffect(() => {
+    if (!session || !isGenerating || gateModalOpen) return;
+
+    const pollInterval = setInterval(async () => {
+      try {
+        const gateStatus = await getCurrentGate(session.id);
+        if (gateStatus.gate_id && !gateModalOpen) {
+          console.log('🔄 Polling detected active gate:', gateStatus.gate_id);
+          setCurrentGate({
+            gate_id: gateStatus.gate_id,
+            gate_name: gateStatus.gate_name,
+            context: gateStatus.context,
+            session_id: session.id
+          });
+          setGateModalOpen(true);
+        }
+      } catch (error) {
+        console.error('Failed to poll gate status:', error);
+      }
+    }, 5000); // Poll every 5 seconds
+
+    return () => clearInterval(pollInterval);
+  }, [session, isGenerating, gateModalOpen]);
 
   // Validation
   const canProceed = () => {
@@ -1473,13 +1499,17 @@ export default function BuilderPage() {
         {renderStepContent()}
       </WizardLayout>
 
-      {/* Human Gate Modal */}
-      <HumanGateModal
-        isOpen={gateModalOpen}
-        onClose={() => setGateModalOpen(false)}
-        gateData={currentGate}
-        onDecision={handleGateDecision}
-      />
+      {/* Cost Tracker */}
+      {session && isGenerating && (
+        <CostTracker
+          sessionId={session.id}
+          totalTokens={costData.totalTokens}
+          sonnetTokens={costData.sonnetTokens}
+          haikuTokens={costData.haikuTokens}
+          estimatedCost={costData.estimatedCost}
+          agentCosts={costData.agentCosts}
+        />
+      )}
 
       {/* Agent Detail Drawer */}
       <AgentDetailDrawer
@@ -1502,17 +1532,13 @@ export default function BuilderPage() {
         } : undefined}
       />
 
-      {/* Cost Tracker */}
-      {session && isGenerating && (
-        <CostTracker
-          sessionId={session.id}
-          totalTokens={costData.totalTokens}
-          sonnetTokens={costData.sonnetTokens}
-          haikuTokens={costData.haikuTokens}
-          estimatedCost={costData.estimatedCost}
-          agentCosts={costData.agentCosts}
-        />
-      )}
+      {/* Human Gate Modal */}
+      <HumanGateModal
+        isOpen={gateModalOpen}
+        onClose={() => setGateModalOpen(false)}
+        gateData={currentGate}
+        onDecision={handleGateDecision}
+      />
     </>
   );
 }
