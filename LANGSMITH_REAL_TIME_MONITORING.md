@@ -9,7 +9,7 @@ From your `.env` file:
 ```env
 LANGCHAIN_TRACING_V2=true
 LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
-LANGCHAIN_API_KEY=<REDACTED_API_KEY>
+LANGCHAIN_API_KEY=<YOUR_API_KEY>
 LANGCHAIN_PROJECT=sap-app-builder
 ```
 
