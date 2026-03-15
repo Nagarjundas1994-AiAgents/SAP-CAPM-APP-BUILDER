@@ -31,6 +31,7 @@ router = APIRouter()
 class GenerateRequest(BaseModel):
     """Request to start generation."""
     llm_provider: str | None = None  # Optional, uses default if not specified
+    llm_model: str | None = None  # Optional, uses default if not specified
 
 
 class GenerationStatus(BaseModel):
@@ -135,11 +136,20 @@ async def start_generation(
     config = session.configuration or {}
     initial_state.update(config)
     
-    # Set LLM provider if specified in request
+    # Ensure LLM provider and model are explicitly set from config (with defaults fallback)
+    from backend.config import get_settings
+    app_settings = get_settings()
+    
+    initial_state["llm_provider"] = config.get("llm_provider", app_settings.default_llm_provider)
+    initial_state["llm_model"] = config.get("llm_model") or app_settings.default_llm_model
+    
+    # Override with request body if provided
     if request.llm_provider:
         initial_state["llm_provider"] = request.llm_provider
+    if request.llm_model:
+        initial_state["llm_model"] = request.llm_model
     
-    logger.info(f"Starting generation with {len(initial_state.get('entities', []))} entities, provider={initial_state.get('llm_provider')}")
+    logger.info(f"Starting generation with {len(initial_state.get('entities', []))} entities, provider={initial_state.get('llm_provider')}, model={initial_state.get('llm_model')}")
     
     # Update session status
     session.status = "in_progress"
@@ -228,7 +238,17 @@ async def stream_generation(
         project_namespace=session.project_namespace or "",
         project_description=session.project_description or "",
     )
-    initial_state.update(session.configuration or {})
+    config = session.configuration or {}
+    initial_state.update(config)
+    
+    # Ensure LLM provider and model are explicitly set from config (with defaults fallback)
+    from backend.config import get_settings
+    app_settings = get_settings()
+    
+    initial_state["llm_provider"] = config.get("llm_provider", app_settings.default_llm_provider)
+    initial_state["llm_model"] = config.get("llm_model") or app_settings.default_llm_model
+    
+    logger.info(f"Starting streaming generation, provider={initial_state.get('llm_provider')}, model={initial_state.get('llm_model')}")
     
     # If using gemini, it might encounter JSON parsing issues with streaming, 
     # but we should still respect the user's choice rather than forcing openai and failing.

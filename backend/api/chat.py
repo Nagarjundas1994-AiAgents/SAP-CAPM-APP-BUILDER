@@ -115,11 +115,13 @@ async def send_chat_message(
     
     # Process through LLM
     llm_provider = current_config.get("llm_provider")
+    llm_model = current_config.get("llm_model")
     result = await process_chat_prompt(
         user_message=request.message,
         current_config=current_config,
         chat_history=chat_history,
         llm_provider=llm_provider,
+        llm_model=llm_model,
     )
     
     # Extract the updated config
@@ -241,6 +243,12 @@ async def regenerate_app(
     initial_state.update(config)
     if not initial_state.get("fiori_main_entity") and entities:
         initial_state["fiori_main_entity"] = entities[0]["name"]
+    
+    # Ensure LLM provider and model are explicitly set from config (with defaults fallback)
+    from backend.config import get_settings
+    app_settings = get_settings()
+    initial_state["llm_provider"] = config.get("llm_provider", app_settings.default_llm_provider)
+    initial_state["llm_model"] = config.get("llm_model") or app_settings.default_llm_model
     
     # Stream the generation using SSE
     import json as json_module

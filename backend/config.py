@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     def llm_models(self) -> dict[str, str]:
         return {
             "openai": self.default_llm_model if self.default_llm_provider == "openai" else "gpt-4o-mini",
-            "gemini": self.default_llm_model if self.default_llm_provider == "gemini" else "gemini-1.5-pro",
+            "gemini": self.default_llm_model if self.default_llm_provider == "gemini" else "gemini-2.5-flash",
             "deepseek": self.default_llm_model if self.default_llm_provider == "deepseek" else "deepseek-chat",
             "kimi": self.default_llm_model if self.default_llm_provider == "kimi" else "moonshot-v1-128k",
             "xai": self.default_llm_model if self.default_llm_provider == "xai" else "grok-4-1-fast-reasoning",

@@ -569,4 +569,5 @@ def create_initial_state(
         
         # LLM
         llm_provider=None,
+        llm_model=None,
     )

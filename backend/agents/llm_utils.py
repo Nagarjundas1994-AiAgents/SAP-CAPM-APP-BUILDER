@@ -43,8 +43,8 @@ def parse_llm_json(response_text: str) -> dict | None:
     # 1. Try direct parse
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
-        pass
+    except json.JSONDecodeError as e:
+        logger.debug(f"Direct JSON parse failed: {e}")
 
     # 2. Extract from markdown code fence
     try:
@@ -54,16 +54,19 @@ def parse_llm_json(response_text: str) -> dict | None:
         elif "```" in text:
             json_str = text.split("```", 1)[1].split("```", 1)[0].strip()
             return json.loads(json_str)
-    except (json.JSONDecodeError, IndexError):
-        pass
+    except (json.JSONDecodeError, IndexError) as e:
+        logger.debug(f"Markdown fence extraction failed: {e}")
 
     # 3. Find first { ... last }
     try:
         start = text.index("{")
         end = text.rindex("}") + 1
-        return json.loads(text[start:end])
-    except (ValueError, json.JSONDecodeError):
-        pass
+        json_str = text[start:end]
+        return json.loads(json_str)
+    except (ValueError, json.JSONDecodeError) as e:
+        logger.debug(f"Bracket extraction failed: {e}")
+        # Log first 500 chars of problematic response for debugging
+        logger.warning(f"Could not parse JSON. Response preview: {text[:500]}...")
 
     return None
 

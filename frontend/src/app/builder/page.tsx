@@ -139,7 +139,7 @@ const createFallbackModel = (
 
 const FALLBACK_PROVIDER_OPTIONS: ProviderSummary[] = [
   { id: 'openai', label: 'OpenAI', configured: false, default_model: 'gpt-5.2', catalog_type: 'static' },
-  { id: 'gemini', label: 'Google Gemini', configured: false, default_model: 'gemini-1.5-pro', catalog_type: 'static' },
+  { id: 'gemini', label: 'Google Gemini', configured: false, default_model: 'gemini-3.1-pro', catalog_type: 'static' },
   { id: 'deepseek', label: 'DeepSeek', configured: false, default_model: 'deepseek-chat', catalog_type: 'static' },
   { id: 'kimi', label: 'Kimi (Moonshot)', configured: false, default_model: 'kimi-k2.5', catalog_type: 'static' },
   { id: 'xai', label: 'xAI', configured: false, default_model: 'grok-4-1-fast-reasoning', catalog_type: 'live' },
@@ -155,7 +155,13 @@ const FALLBACK_MODEL_CATALOG: Record<string, ModelOption[]> = {
     createFallbackModel('o3-mini', 'o3 Mini (Faster)'),
   ],
   gemini: [
-    createFallbackModel('gemini-1.5-pro', 'Gemini 1.5 Pro (Latest - Recommended)', 'paid', true),
+    createFallbackModel('gemini-3.1-pro', 'Gemini 3.1 Pro (Latest - Recommended)', 'paid', true),
+    createFallbackModel('gemini-3-flash', 'Gemini 3 Flash (Fast & Efficient)'),
+    createFallbackModel('gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite (High Volume)'),
+    createFallbackModel('gemini-2.5-pro', 'Gemini 2.5 Pro'),
+    createFallbackModel('gemini-2.5-flash', 'Gemini 2.5 Flash'),
+    createFallbackModel('gemini-2.5-flash-lite', 'Gemini 2.5 Flash Lite'),
+    createFallbackModel('gemini-1.5-pro', 'Gemini 1.5 Pro', 'paid', false),
     createFallbackModel('gemini-1.5-flash', 'Gemini 1.5 Flash (Faster)'),
     createFallbackModel('gemini-2.0-flash', 'Gemini 2.0 Flash'),
   ],

@@ -144,6 +144,7 @@ async def process_chat_prompt(
     current_config: dict[str, Any],
     chat_history: list[dict[str, Any]],
     llm_provider: str | None = None,
+    llm_model: str | None = None,
 ) -> dict[str, Any]:
     """
     Process a user chat prompt and return configuration changes + regeneration plan.
@@ -153,6 +154,7 @@ async def process_chat_prompt(
         current_config: Current session configuration
         chat_history: Previous chat messages for context
         llm_provider: Which LLM provider to use
+        llm_model: Which model to use
 
     Returns:
         Dict with: explanation, updated_config, suggested_followups,
@@ -194,11 +196,13 @@ Keep ALL existing entities/fields unless explicitly asked to remove them."""
 
     try:
         provider_name = llm_provider or current_config.get("llm_provider")
+        model_name = llm_model or current_config.get("llm_model")
 
         response_text = await llm_manager.generate(
             prompt=prompt,
             system_prompt=system_prompt,
             provider=provider_name,
+            model=model_name,
         )
 
         result = parse_llm_json(response_text)

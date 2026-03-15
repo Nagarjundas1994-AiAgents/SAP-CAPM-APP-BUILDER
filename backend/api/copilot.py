@@ -77,7 +77,10 @@ async def copilot_edit_artifact(
 
     # 3. Call LLM to modify the file
     llm = get_llm_manager()
-    provider = config.get("llm_provider", "openai")
+    from backend.config import get_settings
+    app_settings = get_settings()
+    provider = config.get("llm_provider", app_settings.default_llm_provider)
+    llm_model = config.get("llm_model") or app_settings.default_llm_model
     
     system_prompt = '''You are a principal SAP software engineer pair-programming with the user.
 Your task is to modify the provided source code based perfectly on the user's instructions.
@@ -115,6 +118,7 @@ Respond with ONLY this JSON object. No markdown fences, no extra text.'''
             prompt=user_prompt,
             system_prompt=json_system_prompt,
             provider=provider,
+            model=llm_model,
         )
 
         response = parse_llm_json(response_text)
