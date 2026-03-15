@@ -356,11 +356,11 @@ async def _persist_artifacts_to_db(session_id: str, state: BuilderState) -> None
     even if the workflow doesn't emit a workflow_complete event.
     """
     try:
-        from backend.database import get_async_session_context
+        from backend.database import get_session  # ← CORRECT IMPORT
         from backend.models import Session
         from sqlalchemy import select
         
-        async with get_async_session_context() as db:
+        async with get_session() as db:  # ← CORRECT CONTEXT MANAGER
             result = await db.execute(select(Session).where(Session.id == session_id))
             session = result.scalar_one_or_none()
             
