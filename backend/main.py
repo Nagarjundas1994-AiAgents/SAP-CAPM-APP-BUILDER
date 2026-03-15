@@ -30,6 +30,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from backend.config import get_settings
 from backend.database import init_db, close_db
 
+from dotenv import load_dotenv
+load_dotenv()  # ← this is what's missing
 # Configure logging
 settings_early = get_settings()
 if settings_early.log_format == "json":

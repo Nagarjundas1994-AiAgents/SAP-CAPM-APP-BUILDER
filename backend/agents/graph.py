@@ -935,6 +935,11 @@ async def run_generation_workflow_streaming(initial_state: BuilderState):
             
             async for event in graph.astream(initial_state, config=config):
                 for node_name, node_output in event.items():
+                    # Guard against None output
+                    if node_output is None:
+                        logger.warning(f"Node {node_name} returned None, skipping state update")
+                        continue
+                    
                     # Update accumulated state with node output instead of overwriting
                     final_state.update(node_output)
                     node_state = node_output # Legacy reference for the rest of the loop
