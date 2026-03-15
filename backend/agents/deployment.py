@@ -10,6 +10,7 @@ FULLY LLM-DRIVEN with inter-agent context.
 import json
 import logging
 from datetime import datetime
+from typing import Any
 
 from backend.agents.llm_utils import (
     generate_with_retry,
@@ -23,6 +24,7 @@ from backend.agents.state import (
     ValidationError,
 )
 from backend.agents.progress import log_progress
+from backend.agents.resilience import with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -86,9 +88,13 @@ Generate:
 Respond with ONLY valid JSON."""
 
 
-async def deployment_agent(state: BuilderState) -> BuilderState:
+@with_timeout(timeout_seconds=180)
+async def deployment_agent(state: BuilderState) -> dict[str, Any]:
     """Deployment Configuration Agent (LLM-Driven)"""
-    logger.info("Starting Deployment Agent (LLM-Driven)")
+    agent_name = "deployment"
+    started_at = datetime.utcnow().isoformat()
+    
+    logger.info(f"[{agent_name}] Starting Deployment Agent (LLM-Driven)")
 
     now = datetime.utcnow().isoformat()
     errors: list[ValidationError] = []
@@ -98,93 +104,177 @@ async def deployment_agent(state: BuilderState) -> BuilderState:
     state["updated_at"] = now
     state["current_logs"] = []
     log_progress(state, "Starting deployment phase...")
+    
+    # Check retry count
+    retry_count = state.get("retry_counts", {}).get(agent_name, 0)
+    max_retries = state.get("MAX_RETRIES", 5)
+    
+    if retry_count >= max_retries:
+        logger.error(f"[{agent_name}] Max retries ({max_retries}) exhausted")
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        return {
+            "agent_failed": True,
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "failed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": f"Max retries ({max_retries}) exhausted",
+                "logs": None,
+            }],
+            "validation_errors": [{
+                "agent": agent_name,
+                "code": "MAX_RETRIES_EXHAUSTED",
+                "message": f"Agent failed after {max_retries} retries",
+                "field": None,
+                "severity": "error",
+            }]
+        }
+    
+    try:
 
-    project_name = state.get("project_name", "App")
-    namespace = state.get("project_namespace", "com.company.app")
-    deployment_target = state.get("deployment_target", DeploymentTarget.CF.value)
-    entities = state.get("entities", [])
-    context = get_full_context(state)
-    knowledge = get_security_knowledge()  # security_and_deployment reference
+        project_name = state.get("project_name", "App")
+        namespace = state.get("project_namespace", "com.company.app")
+        deployment_target = state.get("deployment_target", DeploymentTarget.CF.value)
+        entities = state.get("entities", [])
+        context = get_full_context(state)
+        knowledge = get_security_knowledge()  # security_and_deployment reference
 
-    prompt = DEPLOYMENT_PROMPT.format(
+        prompt = DEPLOYMENT_PROMPT.format(
         project_name=project_name,
         namespace=namespace,
         deployment_target=deployment_target,
         context=context or "(no prior context)",
         entities_json=json.dumps(entities, indent=2),
-    )
+        )
 
-    # Inject knowledge into prompt
-    prompt = f"{knowledge}\n\n{prompt}"
+        # Inject knowledge into prompt
+        prompt = f"{knowledge}\n\n{prompt}"
 
-    log_progress(state, "Calling LLM for deployment configuration...")
+        log_progress(state, "Calling LLM for deployment configuration...")
 
-    result = await generate_with_retry(
+        result = await generate_with_retry(
         prompt=prompt,
         system_prompt=DEPLOYMENT_SYSTEM_PROMPT,
         state=state,
         required_keys=["package_json"],
         max_retries=3,
         agent_name="deployment",
-    )
+        )
 
-    if result:
-        file_map = {
-            "mta_yaml": ("mta.yaml", "yaml"),
-            "package_json": ("package.json", "json"),
-            "npmrc": (".npmrc", "config"),
-            "env_sample": (".env.sample", "config"),
-            "readme_md": ("README.md", "markdown"),
-            "gitignore": (".gitignore", "config"),
-            "eslintrc_json": (".eslintrc.json", "json"),
-            "prettierrc_json": (".prettierrc.json", "json"),
-            "piper_config_yml": (".pipeline/config.yml", "yaml"),
+        if result:
+            file_map = {
+                "mta_yaml": ("mta.yaml", "yaml"),
+                "package_json": ("package.json", "json"),
+                "npmrc": (".npmrc", "config"),
+                "env_sample": (".env.sample", "config"),
+                "readme_md": ("README.md", "markdown"),
+                "gitignore": (".gitignore", "config"),
+                "eslintrc_json": (".eslintrc.json", "json"),
+                "prettierrc_json": (".prettierrc.json", "json"),
+                "piper_config_yml": (".pipeline/config.yml", "yaml"),
+            }
+            for key, (path, file_type) in file_map.items():
+                content = result.get(key, "")
+                if content:
+                    if key == "package_json" and state.get("integrations_cd_requires"):
+                        try:
+                            pkg = json.loads(content)
+                            if "cds" not in pkg:
+                                pkg["cds"] = {}
+                            if "requires" not in pkg["cds"]:
+                                pkg["cds"]["requires"] = {}
+                            pkg["cds"]["requires"].update(state["integrations_cd_requires"])
+                            content = json.dumps(pkg, indent=2)
+                        except Exception as e:
+                            logger.warning(f"Failed to inject integrations into package.json: {e}")
+                    generated_files.append({"path": path, "content": content, "file_type": file_type})
+
+            log_progress(state, f"✅ Generated {len(generated_files)} deployment files.")
+        else:
+            log_progress(state, "⚠️ LLM failed. Generating minimal deployment config.")
+            generated_files.extend(_minimal_deployment(project_name, namespace))
+            errors.append({
+                "agent": "deployment",
+                "code": "LLM_FAILED",
+                "message": "LLM deployment generation failed.",
+                "field": None,
+                "severity": "warning",
+            })
+
+        existing = state.get("artifacts_deployment", [])
+        state["artifacts_deployment"] = existing + generated_files
+        state["validation_errors"] = state.get("validation_errors", []) + errors
+        state["needs_correction"] = False
+
+        state["agent_history"] = state.get("agent_history", []) + [{
+            "agent_name": "deployment",
+            "status": "completed",
+            "started_at": now,
+            "completed_at": datetime.utcnow().isoformat(),
+            "duration_ms": None,
+            "error": None,
+            "logs": state.get("current_logs", []),
+        }]
+
+        log_progress(state, f"Deployment complete. Generated {len(generated_files)} files.")
+        # Success path
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
+        
+        return {
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "completed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": None,
+                "logs": state.get("current_logs", []),
+            }],
+        "retry_counts": new_retry_counts,
+        "needs_correction": False,
+        "current_agent": agent_name,
+        "updated_at": completed_at,
+    }
+
+    except Exception as e:
+        logger.exception(f"[{agent_name}] Failed with error: {e}")
+        
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
+        
+        return {
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "failed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": str(e),
+                "logs": None,
+            }],
+            "retry_counts": new_retry_counts,
+            "needs_correction": True,
+            "validation_errors": [{
+                "agent": agent_name,
+                "code": "AGENT_ERROR",
+                "message": str(e),
+                "field": None,
+                "severity": "error",
+            }],
+            "current_agent": agent_name,
+            "updated_at": completed_at,
         }
-        for key, (path, file_type) in file_map.items():
-            content = result.get(key, "")
-            if content:
-                if key == "package_json" and state.get("integrations_cd_requires"):
-                    try:
-                        pkg = json.loads(content)
-                        if "cds" not in pkg:
-                            pkg["cds"] = {}
-                        if "requires" not in pkg["cds"]:
-                            pkg["cds"]["requires"] = {}
-                        pkg["cds"]["requires"].update(state["integrations_cd_requires"])
-                        content = json.dumps(pkg, indent=2)
-                    except Exception as e:
-                        logger.warning(f"Failed to inject integrations into package.json: {e}")
-                generated_files.append({"path": path, "content": content, "file_type": file_type})
-
-        log_progress(state, f"✅ Generated {len(generated_files)} deployment files.")
-    else:
-        log_progress(state, "⚠️ LLM failed. Generating minimal deployment config.")
-        generated_files.extend(_minimal_deployment(project_name, namespace))
-        errors.append({
-            "agent": "deployment",
-            "code": "LLM_FAILED",
-            "message": "LLM deployment generation failed.",
-            "field": None,
-            "severity": "warning",
-        })
-
-    existing = state.get("artifacts_deployment", [])
-    state["artifacts_deployment"] = existing + generated_files
-    state["validation_errors"] = state.get("validation_errors", []) + errors
-    state["needs_correction"] = False
-
-    state["agent_history"] = state.get("agent_history", []) + [{
-        "agent_name": "deployment",
-        "status": "completed",
-        "started_at": now,
-        "completed_at": datetime.utcnow().isoformat(),
-        "duration_ms": None,
-        "error": None,
-        "logs": state.get("current_logs", []),
-    }]
-
-    log_progress(state, f"Deployment complete. Generated {len(generated_files)} files.")
-    return state
 
 
 def _minimal_deployment(project_name, namespace):

@@ -19,6 +19,7 @@ FULLY LLM-DRIVEN with inter-agent context.
 import json
 import logging
 from datetime import datetime
+from typing import Any
 
 from backend.agents.llm_utils import (
     generate_with_retry,
@@ -33,6 +34,7 @@ from backend.agents.state import (
     ValidationError,
 )
 from backend.agents.progress import log_progress
+from backend.agents.resilience import with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -111,9 +113,13 @@ Generate comprehensive tests covering:
 Respond with ONLY valid JSON."""
 
 
-async def testing_agent(state: BuilderState) -> BuilderState:
+@with_timeout(timeout_seconds=180)
+async def testing_agent(state: BuilderState) -> dict[str, Any]:
     """Automated Testing Agent (LLM-Driven)"""
-    logger.info("Starting Testing Agent (LLM-Driven)")
+    agent_name = "testing"
+    started_at = datetime.utcnow().isoformat()
+    
+    logger.info(f"[{agent_name}] Starting Testing Agent (LLM-Driven)")
 
     now = datetime.utcnow().isoformat()
     errors: list[ValidationError] = []
@@ -123,124 +129,230 @@ async def testing_agent(state: BuilderState) -> BuilderState:
     state["updated_at"] = now
     state["current_logs"] = []
     log_progress(state, "Starting testing phase...")
+    
+    # Check retry count
+    retry_count = state.get("retry_counts", {}).get(agent_name, 0)
+    max_retries = state.get("MAX_RETRIES", 5)
+    
+    if retry_count >= max_retries:
+        logger.error(f"[{agent_name}] Max retries ({max_retries}) exhausted")
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        return {
+            "agent_failed": True,
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "failed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": f"Max retries ({max_retries}) exhausted",
+                "logs": None,
+            }],
+            "validation_errors": [{
+                "agent": agent_name,
+                "code": "MAX_RETRIES_EXHAUSTED",
+                "message": f"Agent failed after {max_retries} retries",
+                "field": None,
+                "severity": "error",
+            }]
+        }
+    
+    try:
 
-    # Check complexity level — skip for starter
-    complexity = state.get("complexity_level", "standard")
-    if complexity == "starter":
-        log_progress(state, "⏭️ Skipping tests (Starter complexity). No tests generated.")
+        # Check complexity level — skip for starter
+        complexity = state.get("complexity_level", "standard")
+        if complexity == "starter":
+            log_progress(state, "⏭️ Skipping tests (Starter complexity). No tests generated.")
+            state["agent_history"] = state.get("agent_history", []) + [{
+                "agent_name": "testing",
+                "status": "skipped",
+                "started_at": now,
+                "completed_at": datetime.utcnow().isoformat(),
+                "duration_ms": None,
+                "error": None,
+                "logs": ["Skipped: Starter complexity level does not generate tests."],
+            }]
+            # Success path
+            completed_at = datetime.utcnow().isoformat()
+            duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
+        
+        return {
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "completed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": None,
+                "logs": state.get("current_logs", []),
+            }],
+            "retry_counts": new_retry_counts,
+            "needs_correction": False,
+            "current_agent": agent_name,
+            "updated_at": completed_at,
+        }
+
+        entities = state.get("entities", [])
+        project_name = state.get("project_name", "App")
+        namespace = state.get("project_namespace", "com.company.app")
+        business_rules = state.get("business_rules", [])
+
+        schema_context = get_schema_context(state) or "(schema not available)"
+        service_context = get_service_context(state) or "(service not available)"
+        handler_context = get_handler_context(state) or "(handlers not available)"
+
+        # Scope instructions based on complexity
+        if complexity == "standard":
+            scope_instructions = """SCOPE: Generate UNIT TESTS ONLY.
+            - jest.config.js
+            - test/unit/service.test.js (handler tests, validation tests)
+            - test/fixtures/test-data.json
+            Do NOT generate integration tests."""
+        elif complexity == "enterprise":
+            scope_instructions = """SCOPE: Generate UNIT + INTEGRATION TESTS.
+            - jest.config.js
+            - test/unit/service.test.js (handler tests, validation tests, workflow tests)
+            - test/integration/odata.test.js (CRUD, draft lifecycle, auth, query options)
+            - test/fixtures/test-data.json"""
+        else:  # full_stack
+            scope_instructions = """SCOPE: Generate COMPREHENSIVE test suite.
+            - jest.config.js
+            - test/unit/service.test.js (all handlers, validations, calculations, workflows)
+            - test/integration/odata.test.js (full CRUD, draft, auth, batch, error scenarios)
+            - test/fixtures/test-data.json (comprehensive fixtures for all entities)
+            Include inline comments explaining test strategy for each section."""
+
+        prompt = TESTING_GENERATION_PROMPT.format(
+            project_name=project_name,
+            namespace=namespace,
+            schema_context=schema_context,
+            service_context=service_context,
+            handler_context=handler_context,
+            entities_json=json.dumps(entities, indent=2),
+            business_rules_json=json.dumps(business_rules, indent=2),
+            scope_instructions=scope_instructions,
+        )
+
+        # Self-Healing: Inject correction context if present
+        correction_context = state.get("correction_context")
+        if state.get("needs_correction") and state.get("correction_agent") == "testing" and correction_context:
+            log_progress(state, "Applying self-healing correction context...")
+            correction_prompt = correction_context.get("correction_prompt", "")
+            if correction_prompt:
+                prompt = f"CRITICAL CORRECTION REQUIRED:\n{correction_prompt}\n\nORIGINAL INSTRUCTIONS:\n{prompt}"
+
+        log_progress(state, f"Calling LLM for test generation ({complexity} complexity)...")
+
+        result = await generate_with_retry(
+            prompt=prompt,
+            system_prompt=TESTING_SYSTEM_PROMPT,
+            state=state,
+            required_keys=["jest_config_js"],
+            max_retries=3,
+            agent_name="testing",
+        )
+
+        if result:
+            file_map = {
+                "jest_config_js": ("jest.config.js", "javascript"),
+                "unit_test_js": ("test/unit/service.test.js", "javascript"),
+                "integration_test_js": ("test/integration/odata.test.js", "javascript"),
+                "test_fixtures_json": ("test/fixtures/test-data.json", "json"),
+            }
+            for key, (path, file_type) in file_map.items():
+                content = result.get(key, "")
+                if content:
+                    generated_files.append({"path": path, "content": content, "file_type": file_type})
+
+            log_progress(state, f"✅ Generated {len(generated_files)} test files.")
+        else:
+            log_progress(state, "⚠️ LLM failed. Generating minimal test config.")
+            generated_files.extend(_minimal_tests(project_name, entities))
+            errors.append({
+                "agent": "testing",
+                "code": "LLM_FAILED",
+                "message": "LLM test generation failed. Minimal config generated.",
+                "field": None,
+            "severity": "warning",
+        })
+
+        # Store test files under artifacts_srv (alongside service code)
+        existing = state.get("artifacts_srv", [])
+        state["artifacts_srv"] = existing + generated_files
+        state["validation_errors"] = state.get("validation_errors", []) + errors
+        state["needs_correction"] = False
+
         state["agent_history"] = state.get("agent_history", []) + [{
             "agent_name": "testing",
-            "status": "skipped",
+            "status": "completed",
             "started_at": now,
             "completed_at": datetime.utcnow().isoformat(),
             "duration_ms": None,
             "error": None,
-            "logs": ["Skipped: Starter complexity level does not generate tests."],
+            "logs": state.get("current_logs", []),
         }]
-        return state
 
-    entities = state.get("entities", [])
-    project_name = state.get("project_name", "App")
-    namespace = state.get("project_namespace", "com.company.app")
-    business_rules = state.get("business_rules", [])
-
-    schema_context = get_schema_context(state) or "(schema not available)"
-    service_context = get_service_context(state) or "(service not available)"
-    handler_context = get_handler_context(state) or "(handlers not available)"
-
-    # Scope instructions based on complexity
-    if complexity == "standard":
-        scope_instructions = """SCOPE: Generate UNIT TESTS ONLY.
-- jest.config.js
-- test/unit/service.test.js (handler tests, validation tests)
-- test/fixtures/test-data.json
-Do NOT generate integration tests."""
-    elif complexity == "enterprise":
-        scope_instructions = """SCOPE: Generate UNIT + INTEGRATION TESTS.
-- jest.config.js
-- test/unit/service.test.js (handler tests, validation tests, workflow tests)
-- test/integration/odata.test.js (CRUD, draft lifecycle, auth, query options)
-- test/fixtures/test-data.json"""
-    else:  # full_stack
-        scope_instructions = """SCOPE: Generate COMPREHENSIVE test suite.
-- jest.config.js
-- test/unit/service.test.js (all handlers, validations, calculations, workflows)
-- test/integration/odata.test.js (full CRUD, draft, auth, batch, error scenarios)
-- test/fixtures/test-data.json (comprehensive fixtures for all entities)
-Include inline comments explaining test strategy for each section."""
-
-    prompt = TESTING_GENERATION_PROMPT.format(
-        project_name=project_name,
-        namespace=namespace,
-        schema_context=schema_context,
-        service_context=service_context,
-        handler_context=handler_context,
-        entities_json=json.dumps(entities, indent=2),
-        business_rules_json=json.dumps(business_rules, indent=2),
-        scope_instructions=scope_instructions,
-    )
-
-    # Self-Healing: Inject correction context if present
-    correction_context = state.get("correction_context")
-    if state.get("needs_correction") and state.get("correction_agent") == "testing" and correction_context:
-        log_progress(state, "Applying self-healing correction context...")
-        correction_prompt = correction_context.get("correction_prompt", "")
-        if correction_prompt:
-            prompt = f"CRITICAL CORRECTION REQUIRED:\n{correction_prompt}\n\nORIGINAL INSTRUCTIONS:\n{prompt}"
-
-    log_progress(state, f"Calling LLM for test generation ({complexity} complexity)...")
-
-    result = await generate_with_retry(
-        prompt=prompt,
-        system_prompt=TESTING_SYSTEM_PROMPT,
-        state=state,
-        required_keys=["jest_config_js"],
-        max_retries=3,
-        agent_name="testing",
-    )
-
-    if result:
-        file_map = {
-            "jest_config_js": ("jest.config.js", "javascript"),
-            "unit_test_js": ("test/unit/service.test.js", "javascript"),
-            "integration_test_js": ("test/integration/odata.test.js", "javascript"),
-            "test_fixtures_json": ("test/fixtures/test-data.json", "json"),
+        log_progress(state, f"Testing complete. Generated {len(generated_files)} files.")
+        
+        # Success path
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
+        
+        return {
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "completed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": None,
+                "logs": state.get("current_logs", []),
+            }],
+            "retry_counts": new_retry_counts,
+            "needs_correction": False,
+            "current_agent": agent_name,
+            "updated_at": completed_at,
         }
-        for key, (path, file_type) in file_map.items():
-            content = result.get(key, "")
-            if content:
-                generated_files.append({"path": path, "content": content, "file_type": file_type})
 
-        log_progress(state, f"✅ Generated {len(generated_files)} test files.")
-    else:
-        log_progress(state, "⚠️ LLM failed. Generating minimal test config.")
-        generated_files.extend(_minimal_tests(project_name, entities))
-        errors.append({
-            "agent": "testing",
-            "code": "LLM_FAILED",
-            "message": "LLM test generation failed. Minimal config generated.",
-            "field": None,
-            "severity": "warning",
-        })
-
-    # Store test files under artifacts_srv (alongside service code)
-    existing = state.get("artifacts_srv", [])
-    state["artifacts_srv"] = existing + generated_files
-    state["validation_errors"] = state.get("validation_errors", []) + errors
-    state["needs_correction"] = False
-
-    state["agent_history"] = state.get("agent_history", []) + [{
-        "agent_name": "testing",
-        "status": "completed",
-        "started_at": now,
-        "completed_at": datetime.utcnow().isoformat(),
-        "duration_ms": None,
-        "error": None,
-        "logs": state.get("current_logs", []),
-    }]
-
-    log_progress(state, f"Testing complete. Generated {len(generated_files)} files.")
-    return state
+    except Exception as e:
+        logger.exception(f"[{agent_name}] Failed with error: {e}")
+        
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
+        
+        return {
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "failed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": str(e),
+                "logs": None,
+            }],
+            "retry_counts": new_retry_counts,
+            "needs_correction": True,
+            "validation_errors": [{
+                "agent": agent_name,
+                "code": "AGENT_ERROR",
+                "message": str(e),
+                "field": None,
+                "severity": "error",
+            }],
+            "current_agent": agent_name,
+            "updated_at": completed_at,
+        }
 
 
 def _minimal_tests(project_name, entities):

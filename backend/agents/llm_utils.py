@@ -149,12 +149,12 @@ async def generate_with_retry(
                         if attempt < max_retries - 1:
                             current_prompt = f"""Your previous response was missing required keys: {missing}
 
-Previous response (first 500 chars): {response[:500]}
+            Previous response (first 500 chars): {response[:500]}
 
-CRITICAL: Your JSON response MUST contain these keys: {required_keys}
-Respond with ONLY valid JSON. No markdown, no extra text.
+            CRITICAL: Your JSON response MUST contain these keys: {required_keys}
+            Respond with ONLY valid JSON. No markdown, no extra text.
 
-{prompt}"""
+            {prompt}"""
                         continue
                 
                 log_progress(state, f"✅ {model_tag} [{agent_name}] LLM generation successful (attempt {attempt + 1}).")
@@ -167,12 +167,12 @@ Respond with ONLY valid JSON. No markdown, no extra text.
             if attempt < max_retries - 1:
                 current_prompt = f"""Your previous response could not be parsed as JSON. Error: {last_error}
 
-Previous response (first 500 chars): {response[:500]}
+            Previous response (first 500 chars): {response[:500]}
 
-CRITICAL: You MUST respond with ONLY valid JSON. No markdown formatting, no explanation text.
-Start your response with {{ and end with }}.
+            CRITICAL: You MUST respond with ONLY valid JSON. No markdown formatting, no explanation text.
+            Start your response with {{ and end with }}.
 
-{prompt}"""
+            {prompt}"""
 
         except Exception as e:
             last_error = str(e)

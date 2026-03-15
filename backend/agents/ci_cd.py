@@ -7,11 +7,13 @@ GitHub Actions pipeline, MTA build config, quality gates.
 import json
 import logging
 from datetime import datetime
+from typing import Any
 
 from backend.agents.state import BuilderState, GeneratedFile
 from backend.agents.progress import log_progress
 from backend.agents.llm_utils import generate_with_retry
 from backend.rag import retrieve_for_agent
+from backend.agents.resilience import with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +57,8 @@ Tasks:
 Respond with ONLY valid JSON."""
 
 
-async def ci_cd_agent(state: BuilderState) -> BuilderState:
+@with_timeout(timeout_seconds=120)
+async def ci_cd_agent(state: BuilderState) -> dict[str, Any]:
     """
     CI/CD Agent - GitHub Actions, MTA build, quality gates.
     
@@ -65,7 +68,10 @@ async def ci_cd_agent(state: BuilderState) -> BuilderState:
     - Quality gate definitions
     - Deployment pipeline
     """
-    logger.info("Starting CI/CD Agent")
+    agent_name = "ci_cd"
+    started_at = datetime.utcnow().isoformat()
+    
+    logger.info(f"[{agent_name}] Starting CI/CD Agent")
     
     now = datetime.utcnow().isoformat()
     state["current_agent"] = "ci_cd"
@@ -74,54 +80,86 @@ async def ci_cd_agent(state: BuilderState) -> BuilderState:
     
     log_progress(state, "Starting CI/CD phase...")
     
-    # Get context
-    project_name = state.get("project_name", "App")
-    description = state.get("project_description", "")
-    ci_cd_enabled = state.get("ci_cd_enabled", False)
-    ci_cd_platform = state.get("ci_cd_platform", "github_actions")
+    # Check retry count
+    retry_count = state.get("retry_counts", {}).get(agent_name, 0)
+    max_retries = state.get("MAX_RETRIES", 5)
     
-    if not ci_cd_enabled:
-        log_progress(state, "CI/CD not enabled, skipping...")
-        ci_cd_config = {"enabled": False}
-    else:
-        # Retrieve RAG context
-        rag_docs = await retrieve_for_agent("ci_cd", f"GitHub Actions SAP CAP MTA build {project_name}")
-        rag_context = "\n\n".join(rag_docs) if rag_docs else ""
+    if retry_count >= max_retries:
+        logger.error(f"[{agent_name}] Max retries ({max_retries}) exhausted")
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
         
-        prompt = CI_CD_PROMPT.format(
-            project_name=project_name,
-            description=description or "No description provided",
-            ci_cd_enabled=ci_cd_enabled,
-            ci_cd_platform=ci_cd_platform,
-        )
-        
-        if rag_context:
-            prompt = f"REFERENCE DOCUMENTATION:\n{rag_context}\n\n{prompt}"
-        
-        log_progress(state, f"Generating {ci_cd_platform} pipeline...")
-        
-        result = await generate_with_retry(
-            prompt=prompt,
-            system_prompt=CI_CD_SYSTEM_PROMPT,
-            state=state,
-            required_keys=["enabled", "platform"],
-            max_retries=3,
-            agent_name="ci_cd",
-        )
-        
-        if result:
-            ci_cd_config = result
-            workflow_content = result.get("github_actions_workflow", "")
-            log_progress(state, f"✅ Configured {len(result.get('quality_gates', []))} quality gates")
+        return {
+            "agent_failed": True,
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "failed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": f"Max retries ({max_retries}) exhausted",
+                "logs": None,
+            }],
+            "validation_errors": [{
+                "agent": agent_name,
+                "code": "MAX_RETRIES_EXHAUSTED",
+                "message": f"Agent failed after {max_retries} retries",
+                "field": None,
+                "severity": "error",
+            }]
+        }
+    
+    try:
+    
+        # Get context
+        project_name = state.get("project_name", "App")
+        description = state.get("project_description", "")
+        ci_cd_enabled = state.get("ci_cd_enabled", False)
+        ci_cd_platform = state.get("ci_cd_platform", "github_actions")
+    
+        if not ci_cd_enabled:
+            log_progress(state, "CI/CD not enabled, skipping...")
+            ci_cd_config = {"enabled": False}
+            generated_files = []
         else:
-            log_progress(state, "⚠️ LLM generation failed - using minimal CI/CD config")
-            ci_cd_config = {
-                "enabled": True,
-                "platform": ci_cd_platform,
-                "quality_gates": ["lint", "test", "security-scan"],
-                "deployment_stages": ["dev", "staging", "production"]
-            }
-            workflow_content = f"""name: CI/CD Pipeline - {project_name}
+            # Retrieve RAG context
+            rag_docs = await retrieve_for_agent("ci_cd", f"GitHub Actions SAP CAP MTA build {project_name}")
+            rag_context = "\n\n".join(rag_docs) if rag_docs else ""
+            
+            prompt = CI_CD_PROMPT.format(
+                project_name=project_name,
+                description=description or "No description provided",
+                ci_cd_enabled=ci_cd_enabled,
+                ci_cd_platform=ci_cd_platform,
+            )
+            
+            if rag_context:
+                prompt = f"REFERENCE DOCUMENTATION:\n{rag_context}\n\n{prompt}"
+            
+            log_progress(state, f"Generating {ci_cd_platform} pipeline...")
+            
+            result = await generate_with_retry(
+                prompt=prompt,
+                system_prompt=CI_CD_SYSTEM_PROMPT,
+                state=state,
+                required_keys=["enabled", "platform"],
+                max_retries=3,
+                agent_name="ci_cd",
+            )
+            
+            if result:
+                ci_cd_config = result
+                workflow_content = result.get("github_actions_workflow", "")
+                log_progress(state, f"✅ Configured {len(result.get('quality_gates', []))} quality gates")
+            else:
+                log_progress(state, "⚠️ LLM generation failed - using minimal CI/CD config")
+                ci_cd_config = {
+                    "enabled": True,
+                    "platform": ci_cd_platform,
+                    "quality_gates": ["lint", "test", "security-scan"],
+                    "deployment_stages": ["dev", "staging", "production"]
+                }
+                workflow_content = f"""name: CI/CD Pipeline - {project_name}
 
 on:
   push:
@@ -147,21 +185,21 @@ jobs:
       - name: Build MTA
         run: npm run build
 """
-        
-        # Generate workflow file
-        generated_files = [{
-            "path": ".github/workflows/ci.yml",
-            "content": workflow_content,
-            "file_type": "yml"
-        }]
+            
+            # Generate workflow file
+            generated_files = [{
+                "path": ".github/workflows/ci.yml",
+                "content": workflow_content,
+                "file_type": "yml"
+            }]
         
         state["artifacts_deployment"] = state.get("artifacts_deployment", []) + generated_files
     
-    state["ci_cd_config"] = ci_cd_config
-    state["needs_correction"] = False
+        state["ci_cd_config"] = ci_cd_config
+        state["needs_correction"] = False
     
-    # Record execution
-    state["agent_history"] = state.get("agent_history", []) + [{
+        # Record execution
+        state["agent_history"] = state.get("agent_history", []) + [{
         "agent_name": "ci_cd",
         "status": "completed",
         "started_at": now,
@@ -169,7 +207,61 @@ jobs:
         "duration_ms": None,
         "error": None,
         "logs": state.get("current_logs", []),
-    }]
+        }]
     
-    log_progress(state, "CI/CD complete.")
-    return state
+        log_progress(state, "CI/CD complete.")
+        # Success path
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+    
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
+    
+        return {
+        "agent_history": [{
+            "agent_name": agent_name,
+            "status": "completed",
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "duration_ms": duration_ms,
+            "error": None,
+            "logs": state.get("current_logs", []),
+        }],
+        "retry_counts": new_retry_counts,
+        "needs_correction": False,
+        "current_agent": agent_name,
+        "updated_at": completed_at,
+        }
+
+
+    except Exception as e:
+        logger.exception(f"[{agent_name}] Failed with error: {e}")
+    
+    completed_at = datetime.utcnow().isoformat()
+    duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+    
+    new_retry_counts = state.get("retry_counts", {}).copy()
+    new_retry_counts[agent_name] = retry_count + 1
+    
+    return {
+        "agent_history": [{
+            "agent_name": agent_name,
+            "status": "failed",
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "duration_ms": duration_ms,
+            "error": str(e),
+            "logs": None,
+        }],
+        "retry_counts": new_retry_counts,
+        "needs_correction": True,
+        "validation_errors": [{
+            "agent": agent_name,
+            "code": "AGENT_ERROR",
+            "message": str(e),
+            "field": None,
+            "severity": "error",
+        }],
+        "current_agent": agent_name,
+        "updated_at": completed_at,
+    }

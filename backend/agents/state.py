@@ -5,7 +5,8 @@ Defines the global state passed between all agents in the workflow.
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, TypedDict, Literal
+from typing import Any, TypedDict, Literal, Annotated
+import operator
 
 
 # =============================================================================
@@ -325,18 +326,21 @@ class BuilderState(TypedDict, total=False):
     # Agent Execution State
     # -------------------------------------------------------------------------
     current_agent: str
-    agent_history: list[AgentExecution]
-    current_logs: list[str]
+    agent_history: Annotated[list[AgentExecution], operator.add]
+    current_logs: Annotated[list[str], operator.add]
     
     # -------------------------------------------------------------------------
     # Self-Healing / Retry Tracking (UPGRADED)
     # -------------------------------------------------------------------------
     retry_counts: dict[str, int]  # Per-agent retry counter {"data_modeling": 2}
-    correction_history: list[dict[str, Any]]  # Track what was corrected
-    auto_fixed_errors: list[dict[str, Any]]  # Success stories for analytics
+    correction_history: Annotated[list[dict[str, Any]], operator.add]  # Track what was corrected
+    auto_fixed_errors: Annotated[list[dict[str, Any]], operator.add]  # Success stories for analytics
     needs_correction: bool  # Flag to trigger retry in workflow
     agent_failed: bool  # True when max retries exhausted
     MAX_RETRIES: int  # Default 3, configurable per agent
+    validation_retry_count: int  # Number of self-healing correction loops completed
+    correction_agent: str | None  # Agent to route back to for correction
+    correction_context: dict | None  # { "issues": [...], "correction_prompt": "..." }
     
     # -------------------------------------------------------------------------
     # Human Gate State (NEW)
@@ -349,7 +353,7 @@ class BuilderState(TypedDict, total=False):
     # RAG / Documentation (NEW)
     # -------------------------------------------------------------------------
     retrieved_docs: dict[str, list]  # Docs retrieved per agent {"data_modeling": [...]}
-    validation_rules_applied: list[str]  # Rules checked during validation
+    validation_rules_applied: Annotated[list[str], operator.add]  # Rules checked during validation
     
     # -------------------------------------------------------------------------
     # Parallel Phase Tracking (NEW)
@@ -382,17 +386,17 @@ class BuilderState(TypedDict, total=False):
     # -------------------------------------------------------------------------
     # Validation Results
     # -------------------------------------------------------------------------
-    validation_errors: list[ValidationError]
+    validation_errors: Annotated[list[ValidationError], operator.add]
     compliance_status: str
     
     # -------------------------------------------------------------------------
     # Generated Artifacts (by category)
     # -------------------------------------------------------------------------
-    artifacts_db: list[GeneratedFile]  # db/ folder files
-    artifacts_srv: list[GeneratedFile]  # srv/ folder files
-    artifacts_app: list[GeneratedFile]  # app/ folder files
-    artifacts_deployment: list[GeneratedFile]  # mta.yaml, xs-security, etc.
-    artifacts_docs: list[GeneratedFile]  # README, guides
+    artifacts_db: Annotated[list[GeneratedFile], operator.add]  # db/ folder files
+    artifacts_srv: Annotated[list[GeneratedFile], operator.add]  # srv/ folder files
+    artifacts_app: Annotated[list[GeneratedFile], operator.add]  # app/ folder files
+    artifacts_deployment: Annotated[list[GeneratedFile], operator.add]  # mta.yaml, xs-security, etc.
+    artifacts_docs: Annotated[list[GeneratedFile], operator.add]  # README, guides
     
     # -------------------------------------------------------------------------
     # Generation Metadata
@@ -402,7 +406,7 @@ class BuilderState(TypedDict, total=False):
     generation_completed_at: str | None
     generated_workspace_path: str | None
     generated_manifest: dict[str, Any] | None
-    verification_checks: list[VerificationCheck]
+    verification_checks: Annotated[list[VerificationCheck], operator.add]
     verification_summary: dict[str, Any] | None
 
     # -------------------------------------------------------------------------
@@ -415,18 +419,7 @@ class BuilderState(TypedDict, total=False):
     generated_handler_js: str      # Actual srv/service.js from business_logic agent
     generated_manifest_json: str   # Actual manifest.json from fiori_ui agent
 
-    # -------------------------------------------------------------------------
-    # Self-Healing (validation → agent correction loop)
-    # -------------------------------------------------------------------------
-    needs_correction: bool               # Whether validation wants to loop back
-    validation_retry_count: int          # Number of self-healing correction loops completed
-    correction_agent: str | None         # Agent to route back to for correction
-    correction_context: dict | None      # { "issues": [...], "correction_prompt": "..." }
 
-    # -------------------------------------------------------------------------
-    # LLM Provider
-    # -------------------------------------------------------------------------
-    llm_provider: str | None
 
 
 def create_initial_state(

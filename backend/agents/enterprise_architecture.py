@@ -3,6 +3,13 @@ Agent: Enterprise Architecture Blueprint
 
 Builds a deterministic enterprise solution blueprint before implementation
 so downstream agents receive a clear service, UI, security, and delivery plan.
+
+ARCHITECTURE IMPROVEMENTS (2026-03-15):
+- Added timeout wrapper
+- Proper retry counter increment
+- Returns partial state
+- Records agent_history
+- Handles exceptions properly
 """
 
 from __future__ import annotations
@@ -10,8 +17,10 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime
+from typing import Any
 
 from backend.agents.progress import log_progress
+from backend.agents.resilience import with_timeout
 from backend.agents.state import (
     BuilderState,
     EnterpriseBlueprint,
@@ -225,92 +234,186 @@ def _build_architecture_markdown(
     return "\n".join(lines)
 
 
-async def enterprise_architecture_agent(state: BuilderState) -> BuilderState:
-    """Create an enterprise architecture blueprint for downstream generation."""
-    logger.info("Starting Enterprise Architecture Agent")
+@with_timeout(timeout_seconds=60)  # 1 minute for deterministic blueprint generation
+async def enterprise_architecture_agent(state: BuilderState) -> dict[str, Any]:
+    """
+    Create an enterprise architecture blueprint for downstream generation.
+    
+    Returns partial state dict with only changed keys.
+    """
+    agent_name = "enterprise_architecture"
+    logger.info(f"Starting {agent_name} Agent")
 
-    now = datetime.utcnow().isoformat()
-    entities = state.get("entities", [])
-    relationships = state.get("relationships", [])
-    integrations = state.get("integrations", [])
-    complexity = state.get("complexity_level", "standard")
-    project_name = state.get("project_name", "App")
-
-    state["current_agent"] = "enterprise_architecture"
-    state["updated_at"] = now
-    state["current_logs"] = []
+    started_at = datetime.utcnow().isoformat()
+    
+    # =========================================================================
+    # Check retry count and fail if max retries exhausted
+    # =========================================================================
+    retry_count = state.get("retry_counts", {}).get(agent_name, 0)
+    max_retries = state.get("MAX_RETRIES", 5)
+    
+    if retry_count >= max_retries:
+        logger.error(f"[{agent_name}] Max retries ({max_retries}) exhausted")
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        return {
+            "agent_failed": True,
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "failed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": f"Max retries ({max_retries}) exhausted",
+                "logs": None,
+            }],
+            "validation_errors": [{
+                "agent": agent_name,
+                "code": "MAX_RETRIES_EXHAUSTED",
+                "message": f"Agent failed after {max_retries} retries",
+                "field": None,
+                "severity": "error",
+            }]
+        }
 
     log_progress(state, "Building enterprise solution blueprint...")
 
-    root_entities = [
-        entity for entity in entities if not _is_composition_child(entity.get("name", ""), relationships)
-    ] or entities
-    service_modules = _build_service_modules(entities, relationships, integrations)
-    ui_apps = _build_ui_apps(root_entities, service_modules, complexity)
-    quality_gates = _default_quality_gates(complexity)
+    try:
+        entities = state.get("entities", [])
+        relationships = state.get("relationships", [])
+        integrations = state.get("integrations", [])
+        complexity = state.get("complexity_level", "standard")
+        project_name = state.get("project_name", "App")
 
-    blueprint: EnterpriseBlueprint = {
-        "solution_type": "enterprise_cap_fiori",
-        "domain_summary": (
-            f"{project_name} will be generated as a layered SAP CAP solution with "
-            f"{len(service_modules)} service module(s), {len(ui_apps)} UI app(s), "
-            "strong security defaults, deployment assets, and delivery documentation."
-        ),
-        "service_modules": service_modules,
-        "ui_apps": ui_apps,
-        "quality_gates": quality_gates,
-        "deployment_modules": [
-            "srv",
-            "db",
-            "approuter",
-            "xsuaa",
-            "hana" if state.get("database_type") == "hana" else "sqlite",
-        ],
-        "architecture_decisions": [
-            "Use modular CAP services rather than a single monolithic service definition.",
-            "Generate separate Fiori apps for root business capabilities at enterprise scale.",
-            "Preserve clean-core extensibility through extension artifacts and hook registries.",
-            "Materialize the generated project to disk for downstream build and verification steps.",
-        ],
-        "delivery_scope": [
-            "Domain model, services, handlers, UI apps, security, deployment, testing, and documentation",
-            "On-disk generated workspace with manifest and verification report",
-            "Release-readiness checks before download packaging",
-        ],
-    }
+        root_entities = [
+            entity for entity in entities if not _is_composition_child(entity.get("name", ""), relationships)
+        ] or entities
+        service_modules = _build_service_modules(entities, relationships, integrations)
+        ui_apps = _build_ui_apps(root_entities, service_modules, complexity)
+        quality_gates = _default_quality_gates(complexity)
 
-    architecture_md = _build_architecture_markdown(project_name, blueprint, integrations)
-    blueprint_json = json.dumps(blueprint, indent=2)
-    generated_files: list[GeneratedFile] = [
-        {
-            "path": "docs/ARCHITECTURE.md",
-            "content": architecture_md,
-            "file_type": "md",
-        },
-        {
-            "path": "docs/SOLUTION_BLUEPRINT.json",
-            "content": blueprint_json,
-            "file_type": "json",
-        },
-    ]
+        blueprint: EnterpriseBlueprint = {
+            "solution_type": "enterprise_cap_fiori",
+            "domain_summary": (
+                f"{project_name} will be generated as a layered SAP CAP solution with "
+                f"{len(service_modules)} service module(s), {len(ui_apps)} UI app(s), "
+                "strong security defaults, deployment assets, and delivery documentation."
+            ),
+            "service_modules": service_modules,
+            "ui_apps": ui_apps,
+            "quality_gates": quality_gates,
+            "deployment_modules": [
+                "srv",
+                "db",
+                "approuter",
+                "xsuaa",
+                "hana" if state.get("database_type") == "hana" else "sqlite",
+            ],
+            "architecture_decisions": [
+                "Use modular CAP services rather than a single monolithic service definition.",
+                "Generate separate Fiori apps for root business capabilities at enterprise scale.",
+                "Preserve clean-core extensibility through extension artifacts and hook registries.",
+                "Materialize the generated project to disk for downstream build and verification steps.",
+            ],
+            "delivery_scope": [
+                "Domain model, services, handlers, UI apps, security, deployment, testing, and documentation",
+                "On-disk generated workspace with manifest and verification report",
+                "Release-readiness checks before download packaging",
+            ],
+        }
 
-    existing_docs = state.get("artifacts_docs", [])
-    state["artifacts_docs"] = existing_docs + generated_files
-    state["enterprise_blueprint"] = blueprint
-    state["architecture_context_md"] = architecture_md
-    state["service_modules"] = service_modules
-    state["ui_apps"] = ui_apps
-    state["quality_gates"] = quality_gates
+        architecture_md = _build_architecture_markdown(project_name, blueprint, integrations)
+        blueprint_json = json.dumps(blueprint, indent=2)
+        generated_files: list[GeneratedFile] = [
+            {
+                "path": "docs/ARCHITECTURE.md",
+                "content": architecture_md,
+                "file_type": "md",
+            },
+            {
+                "path": "docs/SOLUTION_BLUEPRINT.json",
+                "content": blueprint_json,
+                "file_type": "json",
+            },
+        ]
 
-    state["agent_history"] = state.get("agent_history", []) + [{
-        "agent_name": "enterprise_architecture",
-        "status": "completed",
-        "started_at": now,
-        "completed_at": datetime.utcnow().isoformat(),
-        "duration_ms": None,
-        "error": None,
-        "logs": state.get("current_logs", []),
-    }]
+        # Success path
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        # Increment retry counter
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
 
-    log_progress(state, f"Enterprise blueprint ready with {len(service_modules)} service module(s).")
-    return state
+        log_progress(state, f"Enterprise blueprint ready with {len(service_modules)} service module(s).")
+        
+        # Return only changed keys
+        return {
+            # Agent outputs
+            "artifacts_docs": generated_files,
+            "enterprise_blueprint": blueprint,
+            "architecture_context_md": architecture_md,
+            "service_modules": service_modules,
+            "ui_apps": ui_apps,
+            "quality_gates": quality_gates,
+            
+            # Agent execution tracking
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "completed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": None,
+                "logs": state.get("current_logs", []),
+            }],
+            
+            # Retry tracking
+            "retry_counts": new_retry_counts,
+            "needs_correction": False,
+            
+            # Metadata
+            "current_agent": agent_name,
+            "updated_at": completed_at,
+        }
+    
+    except Exception as e:
+        logger.exception(f"[{agent_name}] Failed with exception: {e}")
+        
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        # Increment retry counter
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
+        
+        return {
+            # Agent execution tracking
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "failed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": str(e),
+                "logs": state.get("current_logs", []),
+            }],
+            
+            # Retry tracking
+            "retry_counts": new_retry_counts,
+            "needs_correction": True,
+            
+            # Validation errors
+            "validation_errors": [{
+                "agent": agent_name,
+                "code": "AGENT_ERROR",
+                "message": str(e),
+                "field": None,
+                "severity": "error",
+            }],
+            
+            # Metadata
+            "current_agent": agent_name,
+            "updated_at": completed_at,
+        }

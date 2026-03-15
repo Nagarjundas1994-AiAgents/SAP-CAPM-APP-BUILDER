@@ -7,10 +7,12 @@ Generates @changelog annotations, history entities, and audit trail CDS.
 import json
 import logging
 from datetime import datetime
+from typing import Any
 
 from backend.agents.state import BuilderState, GeneratedFile
 from backend.agents.progress import log_progress
 from backend.agents.llm_utils import generate_with_retry
+from backend.agents.resilience import with_timeout
 from backend.rag import retrieve_for_agent
 
 logger = logging.getLogger(__name__)
@@ -65,7 +67,8 @@ Tasks:
 Respond with ONLY valid JSON."""
 
 
-async def audit_logging_agent(state: BuilderState) -> BuilderState:
+@with_timeout(timeout_seconds=120)
+async def audit_logging_agent(state: BuilderState) -> dict[str, Any]:
     """
     Audit Logging Agent - @changelog, history entities.
     
@@ -74,76 +77,144 @@ async def audit_logging_agent(state: BuilderState) -> BuilderState:
     - History/audit trail entities
     - Change tracking configuration
     """
-    logger.info("Starting Audit Logging Agent")
+    agent_name = "audit_logging"
+    started_at = datetime.utcnow().isoformat()
     
-    now = datetime.utcnow().isoformat()
-    state["current_agent"] = "audit_logging"
-    state["updated_at"] = now
-    state["current_logs"] = []
-    
+    logger.info(f"[{agent_name}] Starting Audit Logging Agent")
     log_progress(state, "Starting audit logging phase...")
     
-    # Get context
-    project_name = state.get("project_name", "App")
-    description = state.get("project_description", "")
-    entities = state.get("entities", [])
+    # Check retry count
+    retry_count = state.get("retry_counts", {}).get(agent_name, 0)
+    max_retries = state.get("MAX_RETRIES", 5)
     
-    if not entities:
-        log_progress(state, "No entities found - using minimal audit config")
-        audit_logging_spec = {
-            "changelog_entities": [],
-            "audit_trail_config": {},
-            "history_retention_days": 365
+    if retry_count >= max_retries:
+        logger.error(f"[{agent_name}] Max retries ({max_retries}) exhausted")
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        return {
+            "agent_failed": True,
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "failed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": f"Max retries ({max_retries}) exhausted",
+                "logs": None,
+            }],
+            "validation_errors": [{
+                "agent": agent_name,
+                "code": "MAX_RETRIES_EXHAUSTED",
+                "message": f"Agent failed after {max_retries} retries",
+                "field": None,
+                "severity": "error",
+            }]
         }
-    else:
-        # Retrieve RAG context
-        rag_docs = await retrieve_for_agent("audit_logging", f"SAP CAP @changelog audit trail {project_name}")
-        rag_context = "\n\n".join(rag_docs) if rag_docs else ""
+    
+    try:
+        # Get context
+        project_name = state.get("project_name", "App")
+        description = state.get("project_description", "")
+        entities = state.get("entities", [])
         
-        prompt = AUDIT_LOGGING_PROMPT.format(
-            project_name=project_name,
-            description=description or "No description provided",
-            entities_json=json.dumps(entities[:10], indent=2) if entities else "[]",
-        )
-        
-        if rag_context:
-            prompt = f"REFERENCE DOCUMENTATION:\n{rag_context}\n\n{prompt}"
-        
-        log_progress(state, f"Analyzing {len(entities)} entities for audit requirements...")
-        
-        result = await generate_with_retry(
-            prompt=prompt,
-            system_prompt=AUDIT_LOGGING_SYSTEM_PROMPT,
-            state=state,
-            required_keys=["changelog_entities", "audit_trail_config"],
-            max_retries=3,
-            agent_name="audit_logging",
-        )
-        
-        if result:
-            audit_logging_spec = result
-            log_progress(state, f"✅ Configured @changelog for {len(result.get('changelog_entities', []))} entities")
-        else:
-            log_progress(state, "⚠️ LLM generation failed - using minimal audit config")
+        if not entities:
+            log_progress(state, "No entities found - using minimal audit config")
             audit_logging_spec = {
                 "changelog_entities": [],
-                "audit_trail_config": {"enabled": True},
+                "audit_trail_config": {},
                 "history_retention_days": 365
             }
+        else:
+            # Retrieve RAG context
+            rag_docs = await retrieve_for_agent("audit_logging", f"SAP CAP @changelog audit trail {project_name}")
+            rag_context = "\n\n".join(rag_docs) if rag_docs else ""
+            
+            prompt = AUDIT_LOGGING_PROMPT.format(
+                project_name=project_name,
+                description=description or "No description provided",
+                entities_json=json.dumps(entities[:10], indent=2) if entities else "[]",
+            )
+            
+            if rag_context:
+                prompt = f"REFERENCE DOCUMENTATION:\n{rag_context}\n\n{prompt}"
+            
+            log_progress(state, f"Analyzing {len(entities)} entities for audit requirements...")
+            
+            result = await generate_with_retry(
+                prompt=prompt,
+                system_prompt=AUDIT_LOGGING_SYSTEM_PROMPT,
+                state=state,
+                required_keys=["changelog_entities", "audit_trail_config"],
+                max_retries=3,
+                agent_name=agent_name,
+            )
+            
+            if result:
+                audit_logging_spec = result
+                log_progress(state, f"✅ Configured @changelog for {len(result.get('changelog_entities', []))} entities")
+            else:
+                log_progress(state, "⚠️ LLM generation failed - using minimal audit config")
+                audit_logging_spec = {
+                    "changelog_entities": [],
+                    "audit_trail_config": {"enabled": True},
+                    "history_retention_days": 365
+                }
+        
+        # Success path
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
+        
+        log_progress(state, "Audit logging complete.")
+        
+        return {
+            "audit_logging_spec": audit_logging_spec,
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "completed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": None,
+                "logs": state.get("current_logs", []),
+            }],
+            "retry_counts": new_retry_counts,
+            "needs_correction": False,
+            "current_agent": agent_name,
+            "updated_at": completed_at,
+        }
     
-    state["audit_logging_spec"] = audit_logging_spec
-    state["needs_correction"] = False
-    
-    # Record execution
-    state["agent_history"] = state.get("agent_history", []) + [{
-        "agent_name": "audit_logging",
-        "status": "completed",
-        "started_at": now,
-        "completed_at": datetime.utcnow().isoformat(),
-        "duration_ms": None,
-        "error": None,
-        "logs": state.get("current_logs", []),
-    }]
-    
-    log_progress(state, "Audit logging complete.")
-    return state
+    except Exception as e:
+        logger.exception(f"[{agent_name}] Failed with error: {e}")
+        
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
+        
+        return {
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "failed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": str(e),
+                "logs": None,
+            }],
+            "retry_counts": new_retry_counts,
+            "needs_correction": True,
+            "validation_errors": [{
+                "agent": agent_name,
+                "code": "AGENT_ERROR",
+                "message": str(e),
+                "field": None,
+                "severity": "error",
+            }],
+            "current_agent": agent_name,
+            "updated_at": completed_at,
+        }

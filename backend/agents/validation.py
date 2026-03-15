@@ -420,195 +420,304 @@ def _build_correction_context(state: BuilderState, errors: list[ValidationError]
 # Main Agent Function
 # =============================================================================
 
-async def validation_agent(state: BuilderState) -> BuilderState:
+from backend.agents.resilience import with_timeout
+
+
+@with_timeout(timeout_seconds=180)  # 3 minutes for LLM validation
+async def validation_agent(state: BuilderState) -> dict[str, Any]:
     """
     Validation & Compliance Agent (Self-Healing)
 
     Uses LLM for holistic validation + rule-based structural checks.
     When critical errors are found, builds correction context and sets
     needs_correction to route back through the graph.
+    
+    ARCHITECTURE IMPROVEMENTS (2026-03-15):
+    - Added timeout wrapper
+    - Proper retry counter increment
+    - Returns partial state
+    - Records agent_history
+    - Handles exceptions properly
     """
-    logger.info("Starting Validation Agent (Self-Healing)")
-
-    now = datetime.utcnow().isoformat()
+    agent_name = "validation"
+    logger.info(f"Starting {agent_name} Agent (Self-Healing)")
+    
+    started_at = datetime.utcnow().isoformat()
     all_errors: list[ValidationError] = []
     generated_files: list[GeneratedFile] = []
-
-    state["current_agent"] = "validation"
-    state["updated_at"] = now
-    state["current_logs"] = []
+    
+    # =========================================================================
+    # Check retry count and fail if max retries exhausted
+    # =========================================================================
+    retry_count = state.get("retry_counts", {}).get(agent_name, 0)
+    max_retries = state.get("MAX_RETRIES", 5)
+    
+    if retry_count >= max_retries:
+        logger.error(f"[{agent_name}] Max retries ({max_retries}) exhausted")
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        return {
+            "agent_failed": True,
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "failed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": f"Max retries ({max_retries}) exhausted",
+                "logs": None,
+            }],
+            "validation_errors": [{
+                "agent": agent_name,
+                "code": "MAX_RETRIES_EXHAUSTED",
+                "message": f"Agent failed after {max_retries} retries",
+                "field": None,
+                "severity": "error",
+            }]
+        }
 
     log_progress(state, "Starting validation phase...")
 
-    # Collect all artifacts
-    all_artifacts = []
-    for key in ["artifacts_db", "artifacts_srv", "artifacts_app", "artifacts_security",
-                 "artifacts_ext", "artifacts_deploy", "artifacts_deployment", "artifacts_docs"]:
-        all_artifacts.extend(state.get(key, []))
-
-    if not all_artifacts:
-        log_progress(state, "Warning: No artifacts found to validate.")
-
-    project_name = state.get("project_name", "App")
-    namespace = state.get("project_namespace", "com.company.app")
-
-    # ==========================================================================
-    # LLM-driven validation
-    # ==========================================================================
-    llm_success = False
     try:
-        files_summary_parts = []
-        for artifact in all_artifacts:
-            path = artifact.get("path", "unknown")
-            content = artifact.get("content", "")
-            truncated = content[:3000] if len(content) > 3000 else content
-            files_summary_parts.append(f"### {path}\n```\n{truncated}\n```")
+        # Collect all artifacts
+        all_artifacts = []
+        for key in["artifacts_db", "artifacts_srv", "artifacts_app", "artifacts_security",
+                     "artifacts_ext", "artifacts_deploy", "artifacts_deployment", "artifacts_docs"]:
+            all_artifacts.extend(state.get(key, []))
 
-        files_content = "\n\n".join(files_summary_parts)
+        if not all_artifacts:
+            log_progress(state, "Warning: No artifacts found to validate.")
 
-        prompt = VALIDATION_PROMPT.format(
-            project_name=project_name,
-            namespace=namespace,
-            files_content=files_content,
-        )
+        project_name = state.get("project_name", "App")
+        namespace = state.get("project_namespace", "com.company.app")
 
-        log_progress(state, f"Calling LLM to validate {len(all_artifacts)} artifacts...")
+        # ======================================================================
+        # LLM-driven validation
+        # ======================================================================
+        llm_success = False
+        try:
+            files_summary_parts = []
+            for artifact in all_artifacts:
+                path = artifact.get("path", "unknown")
+                content = artifact.get("content", "")
+                truncated = content[:3000] if len(content) > 3000 else content
+                files_summary_parts.append(f"### {path}\n```\n{truncated}\n```")
 
-        result = await generate_with_retry(
-            prompt=prompt,
-            system_prompt=VALIDATION_SYSTEM_PROMPT,
-            state=state,
-            required_keys=["validation_results"],
-            max_retries=2,
-            agent_name="validation",
-        )
+            files_content = "\n\n".join(files_summary_parts)
 
-        if result and "validation_results" in result:
-            for r in result["validation_results"]:
+            prompt = VALIDATION_PROMPT.format(
+                project_name=project_name,
+                namespace=namespace,
+                files_content=files_content,
+            )
+
+            log_progress(state, f"Calling LLM to validate {len(all_artifacts)} artifacts...")
+
+            result = await generate_with_retry(
+                prompt=prompt,
+                system_prompt=VALIDATION_SYSTEM_PROMPT,
+                state=state,
+                required_keys=["validation_results"],
+                max_retries=2,
+                agent_name="validation",
+            )
+
+            if result and "validation_results" in result:
+                for r in result["validation_results"]:
+                    all_errors.append({
+                        "agent": "validation",
+                        "code": r.get("code", "LLM_VALIDATION"),
+                        "message": r.get("message", ""),
+                        "field": r.get("file"),
+                        "severity": r.get("severity", "warning"),
+                        "responsible_agent": r.get("responsible_agent", _infer_agent(r.get("file", ""))),
+                        "fix_hint": r.get("fix_hint", ""),
+                    })
+
+                score = result.get("overall_score", 0)
+                log_progress(state, f"LLM validation complete. Score: {score}/100.")
+                llm_success = True
+            else:
+                log_progress(state, "Could not parse LLM validation response. Using rules only.")
+
+        except Exception as e:
+            logger.warning(f"LLM validation failed: {e}")
+            log_progress(state, f"LLM validation failed ({str(e)[:80]}). Using rules only.")
+
+        # ======================================================================
+        # Deterministic Rule Checklist (NEW - from RAG module)
+        # ======================================================================
+        log_progress(state, "Running deterministic rule checklist...")
+        rule_results = check_all_rules(state)
+        
+        # Store rule results in state
+        validation_rules_applied = [r["rule"] for r in rule_results]
+        
+        # Convert failed rules to validation errors
+        for rule_result in rule_results:
+            if not rule_result["passed"]:
                 all_errors.append({
                     "agent": "validation",
-                    "code": r.get("code", "LLM_VALIDATION"),
-                    "message": r.get("message", ""),
-                    "field": r.get("file"),
-                    "severity": r.get("severity", "warning"),
-                    "responsible_agent": r.get("responsible_agent", _infer_agent(r.get("file", ""))),
-                    "fix_hint": r.get("fix_hint", ""),
+                    "code": rule_result["rule"],
+                    "message": f"{rule_result['description']} - {rule_result['evidence']}",
+                    "field": rule_result["category"],
+                    "severity": "error",
+                    "responsible_agent": rule_result["category"],
                 })
+        
+        failed_rules = [r for r in rule_results if not r["passed"]]
+        passed_rules = [r for r in rule_results if r["passed"]]
+        log_progress(state, f"Rule checklist: {len(passed_rules)}/{len(rule_results)} rules passed")
+        
+        # ======================================================================
+        # Rule-based validation (always runs)
+        # ======================================================================
+        log_progress(state, "Running rule-based validation checks...")
+        for artifact in all_artifacts:
+            try:
+                rule_errors = validate_artifact(artifact)
+                all_errors.extend(rule_errors)
+            except Exception as e:
+                logger.warning(f"Validation error for {artifact.get('path')}: {e}")
 
-            score = result.get("overall_score", 0)
-            log_progress(state, f"LLM validation complete. Score: {score}/100.")
-            llm_success = True
+        # ======================================================================
+        # Cross-file consistency check
+        # ======================================================================
+        cross_errors = validate_cross_file_consistency(state)
+        all_errors.extend(cross_errors)
+        if cross_errors:
+            log_progress(state, f"Cross-file consistency: {len(cross_errors)} issue(s) found.")
+
+        # ======================================================================
+        # Self-healing: determine if correction is needed
+        # ======================================================================
+        error_count = sum(1 for e in all_errors if e.get("severity") == "error")
+        warning_count = sum(1 for e in all_errors if e.get("severity") == "warning")
+
+        validation_retry_count = state.get("validation_retry_count", 0)
+        max_validation_retries = 5  # Maximum self-healing loops
+
+        needs_correction = False
+        correction_agent = None
+        correction_context = None
+        validation_retry_count_new = validation_retry_count
+
+        if error_count > 0 and validation_retry_count < max_validation_retries:
+            corrections = _build_correction_context(state, all_errors)
+            if corrections:
+                # Find the first agent that needs correction
+                responsible_agents = list(corrections.keys())
+                primary_agent = responsible_agents[0]
+
+                needs_correction = True
+                correction_agent = primary_agent
+                correction_context = corrections[primary_agent]
+                validation_retry_count_new = validation_retry_count + 1
+
+                log_progress(state, f"🔁 Self-healing: routing back to '{primary_agent}' for correction (attempt {validation_retry_count + 1}/{max_validation_retries}).")
+                logger.info(f"Self-healing loop: routing to {primary_agent}")
         else:
-            log_progress(state, "Could not parse LLM validation response. Using rules only.")
+            if validation_retry_count >= max_validation_retries and error_count > 0:
+                log_progress(state, f"⚠️ Max self-healing retries ({max_validation_retries}) reached. {error_count} errors remain.")
 
+        # ======================================================================
+        # Generate compliance report
+        # ======================================================================
+        report = generate_compliance_report(state, all_errors)
+        generated_files.append({
+            "path": "docs/COMPLIANCE_REPORT.md",
+            "content": report,
+            "file_type": "md",
+        })
+
+        # ======================================================================
+        # Prepare return state
+        # ======================================================================
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        # Increment retry counter
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
+        
+        method = "LLM + rules" if llm_success else "rule-based"
+        log_progress(state, f"Validation complete ({method}). Errors: {error_count}, Warnings: {warning_count}")
+        
+        generation_status = (
+            GenerationStatus.COMPLETED.value if error_count == 0
+            else GenerationStatus.FAILED.value
+        )
+        
+        # Return only changed keys (not full state copy)
+        return {
+            # Agent outputs
+            "artifacts_docs": generated_files,
+            "validation_errors": all_errors,
+            "validation_rules_applied": validation_rules_applied,
+            "generation_status": generation_status,
+            
+            # Self-healing
+            "needs_correction": needs_correction,
+            "correction_agent": correction_agent,
+            "correction_context": correction_context,
+            "validation_retry_count": validation_retry_count_new,
+            
+            # Agent execution tracking
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "completed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": None,
+                "logs": state.get("current_logs", []),
+            }],
+            
+            # Retry tracking
+            "retry_counts": new_retry_counts,
+            
+            # Metadata
+            "current_agent": agent_name,
+            "updated_at": completed_at,
+        }
+    
     except Exception as e:
-        logger.warning(f"LLM validation failed: {e}")
-        log_progress(state, f"LLM validation failed ({str(e)[:80]}). Using rules only.")
-
-    # ==========================================================================
-    # Deterministic Rule Checklist (NEW - from RAG module)
-    # ==========================================================================
-    log_progress(state, "Running deterministic rule checklist...")
-    rule_results = check_all_rules(state)
-    
-    # Store rule results in state
-    state["validation_rules_applied"] = [r["rule"] for r in rule_results]
-    
-    # Convert failed rules to validation errors
-    for rule_result in rule_results:
-        if not rule_result["passed"]:
-            all_errors.append({
-                "agent": "validation",
-                "code": rule_result["rule"],
-                "message": f"{rule_result['description']} - {rule_result['evidence']}",
-                "field": rule_result["category"],
+        logger.exception(f"[{agent_name}] Failed with exception: {e}")
+        
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        # Increment retry counter
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
+        
+        return {
+            # Agent execution tracking
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "failed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": str(e),
+                "logs": state.get("current_logs", []),
+            }],
+            
+            # Retry tracking
+            "retry_counts": new_retry_counts,
+            "needs_correction": True,
+            
+            # Validation errors
+            "validation_errors": [{
+                "agent": agent_name,
+                "code": "AGENT_ERROR",
+                "message": str(e),
+                "field": None,
                 "severity": "error",
-                "responsible_agent": rule_result["category"],
-            })
-    
-    failed_rules = [r for r in rule_results if not r["passed"]]
-    passed_rules = [r for r in rule_results if r["passed"]]
-    log_progress(state, f"Rule checklist: {len(passed_rules)}/{len(rule_results)} rules passed")
-    
-    # ==========================================================================
-    # Rule-based validation (always runs)
-    # ==========================================================================
-    log_progress(state, "Running rule-based validation checks...")
-    for artifact in all_artifacts:
-        try:
-            rule_errors = validate_artifact(artifact)
-            all_errors.extend(rule_errors)
-        except Exception as e:
-            logger.warning(f"Validation error for {artifact.get('path')}: {e}")
-
-    # ==========================================================================
-    # Cross-file consistency check
-    # ==========================================================================
-    cross_errors = validate_cross_file_consistency(state)
-    all_errors.extend(cross_errors)
-    if cross_errors:
-        log_progress(state, f"Cross-file consistency: {len(cross_errors)} issue(s) found.")
-
-    # ==========================================================================
-    # Self-healing: determine if correction is needed
-    # ==========================================================================
-    error_count = sum(1 for e in all_errors if e.get("severity") == "error")
-    warning_count = sum(1 for e in all_errors if e.get("severity") == "warning")
-
-    retry_count = state.get("validation_retry_count", 0)
-    max_retries = 5  # Maximum self-healing loops
-
-    if error_count > 0 and retry_count < max_retries:
-        corrections = _build_correction_context(state, all_errors)
-        if corrections:
-            # Find the first agent that needs correction
-            responsible_agents = list(corrections.keys())
-            primary_agent = responsible_agents[0]
-
-            state["needs_correction"] = True
-            state["correction_agent"] = primary_agent
-            state["correction_context"] = corrections[primary_agent]
-            state["validation_retry_count"] = retry_count + 1
-
-            log_progress(state, f"🔁 Self-healing: routing back to '{primary_agent}' for correction (attempt {retry_count + 1}/{max_retries}).")
-            logger.info(f"Self-healing loop: routing to {primary_agent}")
-        else:
-            state["needs_correction"] = False
-    else:
-        state["needs_correction"] = False
-        if retry_count >= max_retries and error_count > 0:
-            log_progress(state, f"⚠️ Max self-healing retries ({max_retries}) reached. {error_count} errors remain.")
-
-    # ==========================================================================
-    # Generate compliance report
-    # ==========================================================================
-    report = generate_compliance_report(state, all_errors)
-    generated_files.append({
-        "path": "docs/COMPLIANCE_REPORT.md",
-        "content": report,
-        "file_type": "md",
-    })
-
-    # ==========================================================================
-    # Update state
-    # ==========================================================================
-    state["artifacts_docs"] = state.get("artifacts_docs", []) + generated_files
-    state["validation_errors"] = state.get("validation_errors", []) + all_errors
-    state["generation_status"] = (
-        GenerationStatus.COMPLETED.value if error_count == 0
-        else GenerationStatus.FAILED.value
-    )
-
-    state["agent_history"] = state.get("agent_history", []) + [{
-        "agent_name": "validation",
-        "status": "completed",
-        "started_at": now,
-        "completed_at": datetime.utcnow().isoformat(),
-        "duration_ms": None,
-        "error": None,
-        "logs": state.get("current_logs", []),
-    }]
-
-    method = "LLM + rules" if llm_success else "rule-based"
-    log_progress(state, f"Validation complete ({method}). Errors: {error_count}, Warnings: {warning_count}")
-    return state
+            }],
+            
+            # Metadata
+            "current_agent": agent_name,
+            "updated_at": completed_at,
+        }

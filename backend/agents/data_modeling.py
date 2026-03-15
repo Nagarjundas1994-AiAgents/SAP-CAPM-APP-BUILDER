@@ -6,6 +6,13 @@ associations, compositions, aspects, and annotations.
 
 FULLY LLM-DRIVEN: No template fallbacks. Uses retry with self-healing
 and inter-agent context passing.
+
+ARCHITECTURE IMPROVEMENTS (2026-03-15):
+- Added timeout wrapper
+- Proper retry counter increment
+- Returns partial state
+- Records agent_history
+- Handles exceptions properly
 """
 
 import json
@@ -20,6 +27,7 @@ from backend.agents.llm_utils import (
     store_generated_content,
 )
 from backend.agents.knowledge_loader import get_data_modeling_knowledge
+from backend.agents.resilience import with_timeout
 from backend.agents.state import (
     BuilderState,
     EntityDefinition,
@@ -173,7 +181,8 @@ Respond with ONLY valid JSON."""
 # Main Agent Function
 # =============================================================================
 
-async def data_modeling_agent(state: BuilderState) -> BuilderState:
+@with_timeout(timeout_seconds=180)  # 3 minutes for LLM-heavy CDS generation
+async def data_modeling_agent(state: BuilderState) -> dict[str, Any]:
     """
     CAP Data Modeling Agent (LLM-Driven)
 
@@ -186,175 +195,282 @@ async def data_modeling_agent(state: BuilderState) -> BuilderState:
     3. db/index.cds - Import file
     4. db/data/*.csv - Realistic sample data files
 
-    Returns updated state with generated CDS files.
+    Returns partial state dict with only changed keys.
     """
-    logger.info("Starting Data Modeling Agent (LLM-Driven)")
+    agent_name = "data_modeling"
+    logger.info(f"Starting {agent_name} Agent (LLM-Driven)")
 
-    now = datetime.utcnow().isoformat()
-    errors: list[ValidationError] = []
-    generated_files: list[GeneratedFile] = []
-
-    # Update state
-    state["current_agent"] = "data_modeling"
-    state["updated_at"] = now
-    state["current_logs"] = []
+    started_at = datetime.utcnow().isoformat()
+    
+    # =========================================================================
+    # Check retry count and fail if max retries exhausted
+    # =========================================================================
+    retry_count = state.get("retry_counts", {}).get(agent_name, 0)
+    max_retries = state.get("MAX_RETRIES", 5)
+    
+    if retry_count >= max_retries:
+        logger.error(f"[{agent_name}] Max retries ({max_retries}) exhausted")
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        return {
+            "agent_failed": True,
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "failed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": f"Max retries ({max_retries}) exhausted",
+                "logs": None,
+            }],
+            "validation_errors": [{
+                "agent": agent_name,
+                "code": "MAX_RETRIES_EXHAUSTED",
+                "message": f"Agent failed after {max_retries} retries",
+                "field": None,
+                "severity": "error",
+            }]
+        }
 
     log_progress(state, "Starting data modeling phase...")
 
-    # Check prerequisites
-    entities = state.get("entities", [])
-    if not entities:
-        log_progress(state, "Error: No entities found to process.")
-        errors.append({
-            "agent": "data_modeling",
-            "code": "NO_ENTITIES",
-            "message": "No entities to process. Requirements agent must run first.",
-            "field": "entities",
-            "severity": "error",
-        })
-        state["validation_errors"] = state.get("validation_errors", []) + errors
-        return state
+    try:
+        errors: list[ValidationError] = []
+        generated_files: list[GeneratedFile] = []
 
-    namespace = state.get("project_namespace", "com.company.app")
-    project_name = state.get("project_name", "App")
-    description = state.get("project_description", "")
-    relationships = state.get("relationships", [])
-    business_rules = state.get("business_rules", [])
+        # Check prerequisites
+        entities = state.get("entities", [])
+        if not entities:
+            log_progress(state, "Error: No entities found to process.")
+            
+            completed_at = datetime.utcnow().isoformat()
+            duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+            
+            new_retry_counts = state.get("retry_counts", {}).copy()
+            new_retry_counts[agent_name] = retry_count + 1
+            
+            return {
+                "agent_history": [{
+                    "agent_name": agent_name,
+                    "status": "failed",
+                    "started_at": started_at,
+                    "completed_at": completed_at,
+                    "duration_ms": duration_ms,
+                    "error": "No entities to process",
+                    "logs": state.get("current_logs", []),
+                }],
+                "retry_counts": new_retry_counts,
+                "needs_correction": True,
+                "validation_errors": [{
+                    "agent": agent_name,
+                    "code": "NO_ENTITIES",
+                    "message": "No entities to process. Requirements agent must run first.",
+                    "field": "entities",
+                    "severity": "error",
+                }],
+                "current_agent": agent_name,
+                "updated_at": datetime.utcnow().isoformat(),
+            }
 
-    log_progress(state, f"Processing {len(entities)} entities for CDS schema generation...")
+        namespace = state.get("project_namespace", "com.company.app")
+        project_name = state.get("project_name", "App")
+        description = state.get("project_description", "")
+        relationships = state.get("relationships", [])
+        business_rules = state.get("business_rules", [])
 
-    # ==========================================================================
-    # LLM-Driven Generation with Retry + Knowledge Injection
-    # ==========================================================================
-    knowledge = get_data_modeling_knowledge()
+        log_progress(state, f"Processing {len(entities)} entities for CDS schema generation...")
 
-    prompt = SCHEMA_GENERATION_PROMPT.format(
-        project_name=project_name,
-        namespace=namespace,
-        description=description or "No description provided",
-        entities_json=json.dumps(entities, indent=2),
-        relationships_json=json.dumps(relationships, indent=2),
-        business_rules_json=json.dumps(business_rules, indent=2),
-    )
+        # ==========================================================================
+        # LLM-Driven Generation with Retry + Knowledge Injection
+        # ==========================================================================
+        knowledge = get_data_modeling_knowledge()
 
-    # Inject knowledge into prompt
-    prompt = f"{knowledge}\n\n{prompt}"
+        prompt = SCHEMA_GENERATION_PROMPT.format(
+            project_name=project_name,
+            namespace=namespace,
+            description=description or "No description provided",
+            entities_json=json.dumps(entities, indent=2),
+            relationships_json=json.dumps(relationships, indent=2),
+            business_rules_json=json.dumps(business_rules, indent=2),
+        )
 
-    # Self-Healing: Inject correction context if present
-    correction_context = state.get("correction_context")
-    if state.get("needs_correction") and state.get("correction_agent") == "data_modeling" and correction_context:
-        log_progress(state, "Applying self-healing correction context from validation agent...")
-        correction_prompt = correction_context.get("correction_prompt", "")
-        if correction_prompt:
-            prompt = f"CRITICAL CORRECTION REQUIRED:\n{correction_prompt}\n\nORIGINAL INSTRUCTIONS:\n{prompt}"
+        # Inject knowledge into prompt
+        prompt = f"{knowledge}\n\n{prompt}"
 
-    log_progress(state, "Calling LLM for CDS schema generation...")
+        # Self-Healing: Inject correction context if present
+        correction_context = state.get("correction_context")
+        if state.get("needs_correction") and state.get("correction_agent") == agent_name and correction_context:
+            log_progress(state, "Applying self-healing correction context from validation agent...")
+            correction_prompt = correction_context.get("correction_prompt", "")
+            if correction_prompt:
+                prompt = f"CRITICAL CORRECTION REQUIRED:\n{correction_prompt}\n\nORIGINAL INSTRUCTIONS:\n{prompt}"
 
-    result = await generate_with_retry(
-        prompt=prompt,
-        system_prompt=DATA_MODELING_SYSTEM_PROMPT,
-        state=state,
-        required_keys=["schema_cds"],
-        max_retries=3,
-        agent_name="data_modeling",
-    )
+        log_progress(state, "Calling LLM for CDS schema generation...")
 
-    if result and result.get("schema_cds"):
-        schema_content = result["schema_cds"]
+        result = await generate_with_retry(
+            prompt=prompt,
+            system_prompt=DATA_MODELING_SYSTEM_PROMPT,
+            state=state,
+            required_keys=["schema_cds"],
+            max_retries=3,
+            agent_name=agent_name,
+        )
 
-        # Basic validation: must contain namespace and entity keyword
-        if "entity" in schema_content.lower():
-            # Add common.cds if provided
-            if result.get("common_cds"):
+        if result and result.get("schema_cds"):
+            schema_content = result["schema_cds"]
+
+            # Basic validation: must contain namespace and entity keyword
+            if "entity" in schema_content.lower():
+                # Add common.cds if provided
+                if result.get("common_cds"):
+                    generated_files.append({
+                        "path": "db/common.cds",
+                        "content": result["common_cds"],
+                        "file_type": "cds",
+                    })
+                    log_progress(state, "✅ Generated common.cds with reusable types.")
+
                 generated_files.append({
-                    "path": "db/common.cds",
-                    "content": result["common_cds"],
+                    "path": "db/schema.cds",
+                    "content": schema_content,
                     "file_type": "cds",
                 })
-                log_progress(state, "✅ Generated common.cds with reusable types.")
+                log_progress(state, "✅ Generated CDS schema.")
 
-            generated_files.append({
-                "path": "db/schema.cds",
-                "content": schema_content,
-                "file_type": "cds",
-            })
-            log_progress(state, "✅ Generated CDS schema.")
+                # Process sample data
+                sample_data = result.get("sample_data", [])
+                for sd in sample_data:
+                    if sd.get("filename") and sd.get("content"):
+                        generated_files.append({
+                            "path": sd["filename"],
+                            "content": sd["content"],
+                            "file_type": "csv",
+                        })
 
-            # Process sample data
-            sample_data = result.get("sample_data", [])
-            for sd in sample_data:
-                if sd.get("filename") and sd.get("content"):
-                    generated_files.append({
-                        "path": sd["filename"],
-                        "content": sd["content"],
-                        "file_type": "csv",
-                    })
-
-            if sample_data:
-                log_progress(state, f"✅ Generated {len(sample_data)} sample data files.")
+                if sample_data:
+                    log_progress(state, f"✅ Generated {len(sample_data)} sample data files.")
+            else:
+                log_progress(state, "⚠️ LLM schema missing entity definitions. Adding minimal schema.")
+                schema_content = _generate_minimal_schema(entities, namespace, relationships)
+                generated_files.append({
+                    "path": "db/schema.cds",
+                    "content": schema_content,
+                    "file_type": "cds",
+                })
         else:
-            log_progress(state, "⚠️ LLM schema missing entity definitions. Adding minimal schema.")
+            # Minimal fallback — NOT a template, just the bare minimum to keep pipeline going
+            log_progress(state, "⚠️ LLM generation failed. Generating minimal valid schema.")
             schema_content = _generate_minimal_schema(entities, namespace, relationships)
             generated_files.append({
                 "path": "db/schema.cds",
                 "content": schema_content,
                 "file_type": "cds",
             })
-    else:
-        # Minimal fallback — NOT a template, just the bare minimum to keep pipeline going
-        log_progress(state, "⚠️ LLM generation failed. Generating minimal valid schema.")
-        schema_content = _generate_minimal_schema(entities, namespace, relationships)
+            errors.append({
+                "agent": agent_name,
+                "code": "LLM_FAILED",
+                "message": "LLM schema generation failed. Minimal schema generated.",
+                "field": None,
+                "severity": "warning",
+            })
+
+        # ==========================================================================
+        # Generate db/index.cds
+        # ==========================================================================
+        index_cds = f'using from \'./schema\';\nusing from \'./common\';\n'
         generated_files.append({
-            "path": "db/schema.cds",
-            "content": schema_content,
+            "path": "db/index.cds",
+            "content": index_cds,
             "file_type": "cds",
         })
-        errors.append({
-            "agent": "data_modeling",
-            "code": "LLM_FAILED",
-            "message": "LLM schema generation failed. Minimal schema generated.",
-            "field": None,
-            "severity": "warning",
+
+        # ==========================================================================
+        # Store inter-agent context
+        # ==========================================================================
+        store_generated_content(state, generated_files, {
+            "schema.cds": "generated_schema_cds",
+            "common.cds": "generated_common_cds",
         })
 
-    # ==========================================================================
-    # Generate db/index.cds
-    # ==========================================================================
-    index_cds = f'using from \'./schema\';\nusing from \'./common\';\n'
-    generated_files.append({
-        "path": "db/index.cds",
-        "content": index_cds,
-        "file_type": "cds",
-    })
+        # ==========================================================================
+        # Success path - return partial state
+        # ==========================================================================
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        # Increment retry counter
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
 
-    # ==========================================================================
-    # Store inter-agent context
-    # ==========================================================================
-    store_generated_content(state, generated_files, {
-        "schema.cds": "generated_schema_cds",
-        "common.cds": "generated_common_cds",
-    })
-
-    # ==========================================================================
-    # Update state
-    # ==========================================================================
-    state["artifacts_db"] = generated_files
-    state["validation_errors"] = state.get("validation_errors", []) + errors
-    state["needs_correction"] = False
-
-    # Record execution
-    state["agent_history"] = state.get("agent_history", []) + [{
-        "agent_name": "data_modeling",
-        "status": "completed",
-        "started_at": now,
-        "completed_at": datetime.utcnow().isoformat(),
-        "duration_ms": None,
-        "error": None,
-        "logs": state.get("current_logs", []),
-    }]
-
-    log_progress(state, f"Data modeling complete. Generated {len(generated_files)} files.")
-    return state
+        log_progress(state, f"Data modeling complete. Generated {len(generated_files)} files.")
+        
+        return {
+            # Agent outputs
+            "artifacts_db": generated_files,
+            "generated_schema_cds": state.get("generated_schema_cds", ""),
+            "generated_common_cds": state.get("generated_common_cds", ""),
+            "validation_errors": errors,
+            
+            # Agent execution tracking
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "completed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": None,
+                "logs": state.get("current_logs", []),
+            }],
+            
+            # Retry tracking
+            "retry_counts": new_retry_counts,
+            "needs_correction": False,
+            
+            # Metadata
+            "current_agent": agent_name,
+            "updated_at": completed_at,
+        }
+    
+    except Exception as e:
+        logger.exception(f"[{agent_name}] Failed with exception: {e}")
+        
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        # Increment retry counter
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
+        
+        return {
+            # Agent execution tracking
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "failed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": str(e),
+                "logs": state.get("current_logs", []),
+            }],
+            
+            # Retry tracking
+            "retry_counts": new_retry_counts,
+            "needs_correction": True,
+            
+            # Validation errors
+            "validation_errors": [{
+                "agent": agent_name,
+                "code": "AGENT_ERROR",
+                "message": str(e),
+                "field": None,
+                "severity": "error",
+            }],
+            
+            # Metadata
+            "current_agent": agent_name,
+            "updated_at": completed_at,
+        }
 
 
 # =============================================================================

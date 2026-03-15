@@ -7,11 +7,13 @@ GDPR, data privacy, SAP BTP security standards scan.
 import json
 import logging
 from datetime import datetime
+from typing import Any
 
 from backend.agents.state import BuilderState
 from backend.agents.progress import log_progress
 from backend.agents.llm_utils import generate_with_retry
 from backend.rag import retrieve_for_agent
+from backend.agents.resilience import with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +89,8 @@ Tasks:
 Respond with ONLY valid JSON."""
 
 
-async def compliance_check_agent(state: BuilderState) -> BuilderState:
+@with_timeout(timeout_seconds=120)
+async def compliance_check_agent(state: BuilderState) -> dict[str, Any]:
     """
     Compliance Check Agent - GDPR, data privacy, security scan.
     
@@ -97,7 +100,10 @@ async def compliance_check_agent(state: BuilderState) -> BuilderState:
     - SAP BTP security standards
     - Personal data handling
     """
-    logger.info("Starting Compliance Check Agent")
+    agent_name = "compliance_check"
+    started_at = datetime.utcnow().isoformat()
+    
+    logger.info(f"[{agent_name}] Starting Compliance Check Agent")
     
     now = datetime.utcnow().isoformat()
     state["current_agent"] = "compliance_check"
@@ -106,25 +112,56 @@ async def compliance_check_agent(state: BuilderState) -> BuilderState:
     
     log_progress(state, "Starting compliance check phase...")
     
-    # Get context
-    project_name = state.get("project_name", "App")
-    description = state.get("project_description", "")
-    entities = state.get("entities", [])
-    security_config = state.get("security_config", {})
+    # Check retry count
+    retry_count = state.get("retry_counts", {}).get(agent_name, 0)
+    max_retries = state.get("MAX_RETRIES", 5)
     
-    if not entities:
-        log_progress(state, "No entities found - using minimal compliance report")
-        compliance_report = {
-            "gdpr_compliant": True,
-            "data_privacy_checks": [],
-            "security_scan_results": [],
-            "personal_data_fields": [],
-            "recommendations": []
+    if retry_count >= max_retries:
+        logger.error(f"[{agent_name}] Max retries ({max_retries}) exhausted")
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        return {
+            "agent_failed": True,
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "failed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": f"Max retries ({max_retries}) exhausted",
+                "logs": None,
+            }],
+            "validation_errors": [{
+                "agent": agent_name,
+                "code": "MAX_RETRIES_EXHAUSTED",
+                "message": f"Agent failed after {max_retries} retries",
+                "field": None,
+                "severity": "error",
+            }]
         }
-    else:
-        # Retrieve RAG context
-        rag_docs = await retrieve_for_agent("compliance_check", f"GDPR data privacy SAP BTP security {project_name}")
-        rag_context = "\n\n".join(rag_docs) if rag_docs else ""
+    
+    try:
+    
+        # Get context
+        project_name = state.get("project_name", "App")
+        description = state.get("project_description", "")
+        entities = state.get("entities", [])
+        security_config = state.get("security_config", {})
+    
+        if not entities:
+            log_progress(state, "No entities found - using minimal compliance report")
+            compliance_report = {
+                "gdpr_compliant": True,
+                "data_privacy_checks": [],
+                "security_scan_results": [],
+                "personal_data_fields": [],
+                "recommendations": []
+            }
+        else:
+            # Retrieve RAG context
+            rag_docs = await retrieve_for_agent("compliance_check", f"GDPR data privacy SAP BTP security {project_name}")
+            rag_context = "\n\n".join(rag_docs) if rag_docs else ""
         
         prompt = COMPLIANCE_PROMPT.format(
             project_name=project_name,
@@ -162,11 +199,11 @@ async def compliance_check_agent(state: BuilderState) -> BuilderState:
                 "recommendations": []
             }
     
-    state["compliance_report"] = compliance_report
-    state["needs_correction"] = False
+        state["compliance_report"] = compliance_report
+        state["needs_correction"] = False
     
-    # Record execution
-    state["agent_history"] = state.get("agent_history", []) + [{
+        # Record execution
+        state["agent_history"] = state.get("agent_history", []) + [{
         "agent_name": "compliance_check",
         "status": "completed",
         "started_at": now,
@@ -174,7 +211,61 @@ async def compliance_check_agent(state: BuilderState) -> BuilderState:
         "duration_ms": None,
         "error": None,
         "logs": state.get("current_logs", []),
-    }]
+        }]
     
-    log_progress(state, "Compliance check complete.")
-    return state
+        log_progress(state, "Compliance check complete.")
+        # Success path
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+    
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
+    
+        return {
+        "agent_history": [{
+            "agent_name": agent_name,
+            "status": "completed",
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "duration_ms": duration_ms,
+            "error": None,
+            "logs": state.get("current_logs", []),
+        }],
+        "retry_counts": new_retry_counts,
+        "needs_correction": False,
+        "current_agent": agent_name,
+        "updated_at": completed_at,
+        }
+
+
+    except Exception as e:
+        logger.exception(f"[{agent_name}] Failed with error: {e}")
+        
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
+        
+        return {
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "failed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+            "duration_ms": duration_ms,
+            "error": str(e),
+            "logs": None,
+        }],
+        "retry_counts": new_retry_counts,
+        "needs_correction": True,
+        "validation_errors": [{
+            "agent": agent_name,
+            "code": "AGENT_ERROR",
+            "message": str(e),
+            "field": None,
+            "severity": "error",
+        }],
+        "current_agent": agent_name,
+        "updated_at": completed_at,
+    }

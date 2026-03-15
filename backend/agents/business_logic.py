@@ -6,6 +6,13 @@ custom actions, validations, calculations, and side effects.
 
 FULLY LLM-DRIVEN with inter-agent context: reads actual schema.cds
 AND service.cds from previous agents to generate matching handlers.
+
+ARCHITECTURE IMPROVEMENTS (2026-03-15):
+- Added timeout wrapper
+- Proper retry counter increment
+- Returns partial state
+- Records agent_history
+- Handles exceptions properly
 """
 
 import json
@@ -22,6 +29,7 @@ from backend.agents.llm_utils import (
     store_generated_content,
 )
 from backend.agents.knowledge_loader import get_business_logic_knowledge
+from backend.agents.resilience import with_timeout
 from backend.agents.state import (
     BuilderState,
     GeneratedFile,
@@ -204,151 +212,270 @@ Respond with ONLY valid JSON."""
 # Main Agent Function
 # =============================================================================
 
-async def business_logic_agent(state: BuilderState) -> BuilderState:
+@with_timeout(timeout_seconds=240)  # 4 minutes for LLM-heavy business logic
+async def business_logic_agent(state: BuilderState) -> dict[str, Any]:
     """
     CAP Business Logic Agent (LLM-Driven)
 
     Uses LLM to generate production-quality service handlers.
     Reads actual schema.cds and service.cds for consistency.
+
+    Returns partial state dict with only changed keys.
     """
-    logger.info("Starting Business Logic Agent (LLM-Driven)")
+    agent_name = "business_logic"
+    logger.info(f"Starting {agent_name} Agent (LLM-Driven)")
 
-    now = datetime.utcnow().isoformat()
-    errors: list[ValidationError] = []
-    generated_files: list[GeneratedFile] = []
+    started_at = datetime.utcnow().isoformat()
 
-    state["current_agent"] = "business_logic"
-    state["updated_at"] = now
-    state["current_logs"] = []
+    # =========================================================================
+    # Check retry count and fail if max retries exhausted
+    # =========================================================================
+    retry_count = state.get("retry_counts", {}).get(agent_name, 0)
+    max_retries = state.get("MAX_RETRIES", 5)
+
+    if retry_count >= max_retries:
+        logger.error(f"[{agent_name}] Max retries ({max_retries}) exhausted")
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+
+        return {
+            "agent_failed": True,
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "failed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": f"Max retries ({max_retries}) exhausted",
+                "logs": None,
+            }],
+            "validation_errors": [{
+                "agent": agent_name,
+                "code": "MAX_RETRIES_EXHAUSTED",
+                "message": f"Agent failed after {max_retries} retries",
+                "field": None,
+                "severity": "error",
+            }]
+        }
 
     log_progress(state, "Starting business logic phase...")
 
-    entities = state.get("entities", [])
-    if not entities:
-        log_progress(state, "Error: No entities found.")
-        return state
+    try:
+        errors: list[ValidationError] = []
+        generated_files: list[GeneratedFile] = []
 
-    project_name = state.get("project_name", "App")
-    relationships = state.get("relationships", [])
-    business_rules = state.get("business_rules", [])
+        entities = state.get("entities", [])
+        if not entities:
+            log_progress(state, "Error: No entities found.")
 
-    service_name = "".join(
-        word.capitalize()
-        for word in project_name.replace("-", " ").replace("_", " ").split()
-    )
-    service_name = f"{service_name}Service"
+            completed_at = datetime.utcnow().isoformat()
+            duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
 
-    # Get inter-agent context
-    schema_context = get_schema_context(state)
-    service_context = get_service_context(state)
-    architecture_context = get_architecture_context(state)
-    knowledge = get_business_logic_knowledge()
+            new_retry_counts = state.get("retry_counts", {}).copy()
+            new_retry_counts[agent_name] = retry_count + 1
 
-    prompt = HANDLER_GENERATION_PROMPT.format(
-        project_name=project_name,
-        service_name=service_name,
-        architecture_context=architecture_context or "(architecture blueprint not available)",
-        schema_context=schema_context or "(schema not available)",
-        service_context=service_context or "(service CDS not available)",
-        entities_json=json.dumps(entities, indent=2),
-        relationships_json=json.dumps(relationships, indent=2),
-        business_rules_json=json.dumps(business_rules, indent=2),
-    )
+            return {
+                "agent_history": [{
+                    "agent_name": agent_name,
+                    "status": "failed",
+                    "started_at": started_at,
+                    "completed_at": completed_at,
+                    "duration_ms": duration_ms,
+                    "error": "No entities found",
+                    "logs": state.get("current_logs", []),
+                }],
+                "retry_counts": new_retry_counts,
+                "needs_correction": True,
+                "validation_errors": [{
+                    "agent": agent_name,
+                    "code": "NO_ENTITIES",
+                    "message": "No entities found.",
+                    "field": "entities",
+                    "severity": "error",
+                }],
+                "current_agent": agent_name,
+                "updated_at": datetime.utcnow().isoformat(),
+            }
 
-    # Inject knowledge into prompt
-    prompt = f"{knowledge}\n\n{prompt}"
+        project_name = state.get("project_name", "App")
+        relationships = state.get("relationships", [])
+        business_rules = state.get("business_rules", [])
 
-    # Self-Healing: Inject correction context if present
-    correction_context = state.get("correction_context")
-    if state.get("needs_correction") and state.get("correction_agent") == "business_logic" and correction_context:
-        log_progress(state, "Applying self-healing correction context from validation agent...")
-        correction_prompt = correction_context.get("correction_prompt", "")
-        if correction_prompt:
-            prompt = f"CRITICAL CORRECTION REQUIRED:\n{correction_prompt}\n\nORIGINAL INSTRUCTIONS:\n{prompt}"
+        service_name = "".join(
+            word.capitalize()
+            for word in project_name.replace("-", " ").replace("_", " ").split()
+        )
+        service_name = f"{service_name}Service"
 
-    log_progress(state, "Calling LLM for business logic generation...")
+        # Get inter-agent context
+        schema_context = get_schema_context(state)
+        service_context = get_service_context(state)
+        architecture_context = get_architecture_context(state)
+        knowledge = get_business_logic_knowledge()
 
-    result = await generate_with_retry(
-        prompt=prompt,
-        system_prompt=BUSINESS_LOGIC_SYSTEM_PROMPT,
-        state=state,
-        required_keys=["service_js"],
-        max_retries=3,
-        agent_name="business_logic",
-    )
+        prompt = HANDLER_GENERATION_PROMPT.format(
+            project_name=project_name,
+            service_name=service_name,
+            architecture_context=architecture_context or "(architecture blueprint not available)",
+            schema_context=schema_context or "(schema not available)",
+            service_context=service_context or "(service CDS not available)",
+            entities_json=json.dumps(entities, indent=2),
+            relationships_json=json.dumps(relationships, indent=2),
+            business_rules_json=json.dumps(business_rules, indent=2),
+        )
 
-    if result and any(k.endswith('_service_js') or k == 'service_js' for k in result.keys()):
-        # Handle modular services or single service fallback
-        handler_keys = [k for k in result.keys() if k.endswith('_service_js') or k == 'service_js']
-        
-        valid_handlers = False
-        for key in handler_keys:
-            handler_content = result[key]
-            
-            # Use original filename if service_js, else convert admin_service_js -> admin-service.js
-            filename = 'service.js' if key == 'service_js' else key.replace('_js', '.js').replace('_', '-')
-            
-            if "cds" in handler_content.lower() or "module.exports" in handler_content:
-                generated_files.append({
-                    "path": f"srv/{filename}",
-                    "content": handler_content,
-                    "file_type": "javascript",
-                })
-                log_progress(state, f"✅ Generated service handler ({filename}).")
-                valid_handlers = True
+        # Inject knowledge into prompt
+        prompt = f"{knowledge}\n\n{prompt}"
 
-            if result.get("validation_js"):
-                generated_files.append({
-                    "path": "srv/lib/validation.js",
-                    "content": result["validation_js"],
-                    "file_type": "javascript",
-                })
-                log_progress(state, "✅ Generated validation utilities.")
+        # Self-Healing: Inject correction context if present
+        correction_context = state.get("correction_context")
+        if state.get("needs_correction") and state.get("correction_agent") == agent_name and correction_context:
+            log_progress(state, "Applying self-healing correction context from validation agent...")
+            correction_prompt = correction_context.get("correction_prompt", "")
+            if correction_prompt:
+                prompt = f"CRITICAL CORRECTION REQUIRED:\n{correction_prompt}\n\nORIGINAL INSTRUCTIONS:\n{prompt}"
 
-            if result.get("numbering_js"):
-                generated_files.append({
-                    "path": "srv/lib/numbering.js",
-                    "content": result["numbering_js"],
-                    "file_type": "javascript",
-                })
-                log_progress(state, "✅ Generated numbering utilities.")
-        if not valid_handlers:
-            log_progress(state, "⚠️ Handler content looks invalid. Generating minimal modular handlers.")
+        log_progress(state, "Calling LLM for business logic generation...")
+
+        result = await generate_with_retry(
+            prompt=prompt,
+            system_prompt=BUSINESS_LOGIC_SYSTEM_PROMPT,
+            state=state,
+            required_keys=["service_js"],
+            max_retries=3,
+            agent_name=agent_name,
+        )
+
+        if result and any(k.endswith('_service_js') or k == 'service_js' for k in result.keys()):
+            # Handle modular services or single service fallback
+            handler_keys = [k for k in result.keys() if k.endswith('_service_js') or k == 'service_js']
+
+            valid_handlers = False
+            for key in handler_keys:
+                handler_content = result[key]
+
+                # Use original filename if service_js, else convert admin_service_js -> admin-service.js
+                filename = 'service.js' if key == 'service_js' else key.replace('_js', '.js').replace('_', '-')
+
+                if "cds" in handler_content.lower() or "module.exports" in handler_content:
+                    generated_files.append({
+                        "path": f"srv/{filename}",
+                        "content": handler_content,
+                        "file_type": "javascript",
+                    })
+                    log_progress(state, f"✅ Generated service handler ({filename}).")
+                    valid_handlers = True
+
+                if result.get("validation_js"):
+                    generated_files.append({
+                        "path": "srv/lib/validation.js",
+                        "content": result["validation_js"],
+                        "file_type": "javascript",
+                    })
+                    log_progress(state, "✅ Generated validation utilities.")
+
+                if result.get("numbering_js"):
+                    generated_files.append({
+                        "path": "srv/lib/numbering.js",
+                        "content": result["numbering_js"],
+                        "file_type": "javascript",
+                    })
+                    log_progress(state, "✅ Generated numbering utilities.")
+            if not valid_handlers:
+                log_progress(state, "⚠️ Handler content looks invalid. Generating minimal modular handlers.")
+                generated_files.extend(_minimal_handler(entities, service_name))
+        else:
+            log_progress(state, "⚠️ LLM generation failed. Generating minimal modular handlers.")
             generated_files.extend(_minimal_handler(entities, service_name))
-    else:
-        log_progress(state, "⚠️ LLM generation failed. Generating minimal modular handlers.")
-        generated_files.extend(_minimal_handler(entities, service_name))
-        errors.append({
-            "agent": "business_logic",
-            "code": "LLM_FAILED",
-            "message": "LLM handler generation failed. Minimal handler generated.",
-            "field": None,
-            "severity": "warning",
+            errors.append({
+                "agent": agent_name,
+                "code": "LLM_FAILED",
+                "message": "LLM handler generation failed. Minimal handler generated.",
+                "field": None,
+                "severity": "warning",
+            })
+
+        store_generated_content(state, generated_files, {
+            "admin-service.js": "generated_handler_js",
+            "service.js": "generated_handler_js" # Fallback mapping
         })
 
-    store_generated_content(state, generated_files, {
-        "admin-service.js": "generated_handler_js",
-        "service.js": "generated_handler_js" # Fallback mapping
-    })
+        # Success path
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
 
-    # Update state — append to existing srv artifacts
-    existing_srv = state.get("artifacts_srv", [])
-    state["artifacts_srv"] = existing_srv + generated_files
-    state["validation_errors"] = state.get("validation_errors", []) + errors
-    state["needs_correction"] = False
+        # Increment retry counter
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
 
-    state["agent_history"] = state.get("agent_history", []) + [{
-        "agent_name": "business_logic",
-        "status": "completed",
-        "started_at": now,
-        "completed_at": datetime.utcnow().isoformat(),
-        "duration_ms": None,
-        "error": None,
-        "logs": state.get("current_logs", []),
-    }]
+        log_progress(state, f"Business logic complete. Generated {len(generated_files)} files.")
 
-    log_progress(state, f"Business logic complete. Generated {len(generated_files)} files.")
-    return state
+        return {
+            # Agent outputs
+            "artifacts_srv": generated_files,
+            "generated_handler_js": state.get("generated_handler_js", ""),
+            "validation_errors": errors,
+
+            # Agent execution tracking
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "completed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": None,
+                "logs": state.get("current_logs", []),
+            }],
+
+            # Retry tracking
+            "retry_counts": new_retry_counts,
+            "needs_correction": False,
+
+            # Metadata
+            "current_agent": agent_name,
+            "updated_at": completed_at,
+        }
+
+    except Exception as e:
+        logger.exception(f"[{agent_name}] Failed with exception: {e}")
+
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+
+        # Increment retry counter
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
+
+        return {
+            # Agent execution tracking
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "failed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": str(e),
+                "logs": state.get("current_logs", []),
+            }],
+
+            # Retry tracking
+            "retry_counts": new_retry_counts,
+            "needs_correction": True,
+
+            # Validation errors
+            "validation_errors": [{
+                "agent": agent_name,
+                "code": "AGENT_ERROR",
+                "message": str(e),
+                "field": None,
+                "severity": "error",
+            }],
+
+            # Metadata
+            "current_agent": agent_name,
+            "updated_at": completed_at,
+        }
+
 
 
 # =============================================================================

@@ -10,11 +10,13 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime
+from typing import Any
 from pathlib import Path
 
 from backend.agents.progress import log_progress
 from backend.agents.state import BuilderState, GeneratedFile
 from backend.config import get_settings
+from backend.agents.resilience import with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -145,9 +147,13 @@ def _ensure_essential_artifacts(state: BuilderState) -> None:
         _append_artifact(state, "artifacts_docs", "docs/OPERATIONS_RUNBOOK.md", runbook, "md")
 
 
-async def project_assembly_agent(state: BuilderState) -> BuilderState:
+@with_timeout(timeout_seconds=60)
+async def project_assembly_agent(state: BuilderState) -> dict[str, Any]:
     """Write generated artifacts to a real workspace directory."""
-    logger.info("Starting Project Assembly Agent")
+    agent_name = "project_assembly"
+    started_at = datetime.utcnow().isoformat()
+    
+    logger.info(f"[{agent_name}] Starting Project Assembly Agent")
 
     now = datetime.utcnow().isoformat()
     settings = get_settings()

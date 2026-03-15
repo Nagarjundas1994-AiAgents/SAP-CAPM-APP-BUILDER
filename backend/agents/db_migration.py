@@ -12,15 +12,20 @@ from typing import Any
 
 from backend.agents.progress import log_progress
 from backend.agents.state import BuilderState, GeneratedFile, ValidationError
+from backend.agents.resilience import with_timeout
 
 logger = logging.getLogger(__name__)
 
-async def db_migration_agent(state: BuilderState) -> BuilderState:
+@with_timeout(timeout_seconds=60)
+async def db_migration_agent(state: BuilderState) -> dict[str, Any]:
     """
     Database Migration Agent
     Generates DB-specific artifacts and migration scripts.
     """
-    logger.info("Starting DB Migration Agent")
+    agent_name = "db_migration"
+    started_at = datetime.utcnow().isoformat()
+    
+    logger.info(f"[{agent_name}] Starting DB Migration Agent")
 
     now = datetime.utcnow().isoformat()
     errors: list[ValidationError] = []
@@ -31,82 +36,165 @@ async def db_migration_agent(state: BuilderState) -> BuilderState:
     state["current_logs"] = []
 
     log_progress(state, "Starting database migration config...")
+    
+    # Check retry count
+    retry_count = state.get("retry_counts", {}).get(agent_name, 0)
+    max_retries = state.get("MAX_RETRIES", 5)
+    
+    if retry_count >= max_retries:
+        logger.error(f"[{agent_name}] Max retries ({max_retries}) exhausted")
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        return {
+            "agent_failed": True,
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "failed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": f"Max retries ({max_retries}) exhausted",
+                "logs": None,
+            }],
+            "validation_errors": [{
+                "agent": agent_name,
+                "code": "MAX_RETRIES_EXHAUSTED",
+                "message": f"Agent failed after {max_retries} retries",
+                "field": None,
+                "severity": "error",
+            }]
+        }
+    
+    try:
+        db_type = state.get("database_type", "sqlite")
+        mtx_enabled = state.get("multitenancy_enabled", False)
+        entities = state.get("entities", [])
+        namespace = state.get("project_namespace", "com.company.app")
 
-    db_type = state.get("database_type", "sqlite")
-    mtx_enabled = state.get("multitenancy_enabled", False)
-    entities = state.get("entities", [])
-    namespace = state.get("project_namespace", "com.company.app")
+        if not entities:
+            log_progress(state, "No entities found to generate migrations for.")
+            return state
 
-    if not entities:
-         log_progress(state, "No entities found to generate migrations for.")
-         return state
+        # 1. Multi-Tenancy (MTX) Configuration if enabled
+        if mtx_enabled:
+            log_progress(state, "Generating Multi-Tenancy (MTX) artifacts...")
+            # Add basic MTX config to package.json (simulated here via a specific artifact or later in deployment)
+            generated_files.append({
+                "path": "db/mtx.json",
+                "content": '{\n  "tenant_provisioning": true\n}',
+                "file_type": "json"
+            })
 
-    # 1. Multi-Tenancy (MTX) Configuration if enabled
-    if mtx_enabled:
-        log_progress(state, "Generating Multi-Tenancy (MTX) artifacts...")
-        # Add basic MTX config to package.json (simulated here via a specific artifact or later in deployment)
-        generated_files.append({
-            "path": "db/mtx.json",
-            "content": '{\n  "tenant_provisioning": true\n}',
-            "file_type": "json"
-        })
-
-    # 2. HANA-native artifacts (if HANA selected or MTX enabled requiring separate tenant HDI containers)
-    if db_type == "hana" or mtx_enabled:
-        log_progress(state, "Generating HANA-native artifacts (.hdbview, .hdbrole)...")
-        for entity in entities:
-             name = entity.get("name", "")
-             if name:
-                 # Generate a dummy calculation view representation for demonstration
-                 view_content = f'VIEW "{namespace}_{name}View" AS SELECT * FROM "{namespace}.{name}"'
-                 generated_files.append({
-                     "path": f"db/src/gen/{name}.hdbview",
-                     "content": view_content,
-                     "file_type": "hdbview"
-                 })
-                 
-        admin_role_entity = entities[0].get('name', 'Entity') if entities else 'Unknown'
-        role_content = f'''{{
-  "role": {{
-    "name": "{namespace}::admin",
-    "object_privileges": [
-      {{
+        # 2. HANA-native artifacts (if HANA selected or MTX enabled requiring separate tenant HDI containers)
+        if db_type == "hana" or mtx_enabled:
+            log_progress(state, "Generating HANA-native artifacts (.hdbview, .hdbrole)...")
+            for entity in entities:
+                name = entity.get("name", "")
+                if name:
+                    # Generate a dummy calculation view representation for demonstration
+                    view_content = f'VIEW "{namespace}_{name}View" AS SELECT * FROM "{namespace}.{name}"'
+                    generated_files.append({
+                        "path": f"db/src/gen/{name}.hdbview",
+                        "content": view_content,
+                        "file_type": "hdbview"
+                    })
+                    
+            admin_role_entity = entities[0].get('name', 'Entity') if entities else 'Unknown'
+            role_content = f'''{{
+        "role": {{
+        "name": "{namespace}::admin",
+        "object_privileges": [
+        {{
         "name": "{namespace}.{admin_role_entity}",
         "type": "TABLE",
         "privileges": [ "SELECT", "INSERT", "UPDATE", "DELETE" ]
-      }}
-    ]
-  }}
-}}'''
-        generated_files.append({
-            "path": "db/src/roles/admin.hdbrole",
-            "content": role_content,
-            "file_type": "json"
-        })
+        }}
+        ]
+        }}
+        }}'''
+            generated_files.append({
+                "path": "db/src/roles/admin.hdbrole",
+                "content": role_content,
+                "file_type": "json"
+            })
 
-    # 3. Standard local migrations (simulate Alembic or CDS migrate)
-    if db_type == "sqlite":
-         log_progress(state, "Generating standard migration scripts...")
-         generated_files.append({
-            "path": "db/migrations/001_initial_schema.sql",
-            "content": "-- Initial Schema Migration\n-- Auto-generated by CDS\n",
-            "file_type": "sql"
-        })
+        # 3. Standard local migrations (simulate Alembic or CDS migrate)
+        if db_type == "sqlite":
+            log_progress(state, "Generating standard migration scripts...")
+            generated_files.append({
+                "path": "db/migrations/001_initial_schema.sql",
+                "content": "-- Initial Schema Migration\n-- Auto-generated by CDS\n",
+                "file_type": "sql"
+            })
 
-    # Append new files to state
-    existing_db = state.get("artifacts_db", [])
-    state["artifacts_db"] = existing_db + generated_files
-    
-    # Store history
-    state["agent_history"] = state.get("agent_history", []) + [{
-        "agent_name": "db_migration",
-        "status": "completed",
-        "started_at": now,
-        "completed_at": datetime.utcnow().isoformat(),
-        "duration_ms": None,
-        "error": None,
-        "logs": state.get("current_logs", []),
-    }]
+        # Append new files to state
+        existing_db = state.get("artifacts_db", [])
+        state["artifacts_db"] = existing_db + generated_files
+        
+        # Store history
+        state["agent_history"] = state.get("agent_history", []) + [{
+            "agent_name": "db_migration",
+            "status": "completed",
+            "started_at": now,
+            "completed_at": datetime.utcnow().isoformat(),
+            "duration_ms": None,
+            "error": None,
+            "logs": state.get("current_logs", []),
+        }]
 
-    log_progress(state, f"DB migration configs generated ({len(generated_files)} files).")
-    return state
+        log_progress(state, f"DB migration configs generated ({len(generated_files)} files).")
+        # Success path
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
+        
+        return {
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "completed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": None,
+                "logs": state.get("current_logs", []),
+            }],
+            "retry_counts": new_retry_counts,
+            "needs_correction": False,
+            "current_agent": agent_name,
+            "updated_at": completed_at,
+        }
+
+    except Exception as e:
+        logger.exception(f"[{agent_name}] Failed with error: {e}")
+        
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
+        
+        return {
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "failed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": str(e),
+                "logs": None,
+            }],
+            "retry_counts": new_retry_counts,
+            "needs_correction": True,
+            "validation_errors": [{
+                "agent": agent_name,
+                "code": "AGENT_ERROR",
+                "message": str(e),
+                "field": None,
+                "severity": "error",
+            }],
+            "current_agent": agent_name,
+            "updated_at": completed_at,
+    }

@@ -7,11 +7,13 @@ Generates BTP Feature Flags service config and toggle definitions.
 import json
 import logging
 from datetime import datetime
+from typing import Any
 
 from backend.agents.state import BuilderState, GeneratedFile
 from backend.agents.progress import log_progress
 from backend.agents.llm_utils import generate_with_retry
 from backend.rag import retrieve_for_agent
+from backend.agents.resilience import with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +61,8 @@ Tasks:
 Respond with ONLY valid JSON."""
 
 
-async def feature_flags_agent(state: BuilderState) -> BuilderState:
+@with_timeout(timeout_seconds=60)
+async def feature_flags_agent(state: BuilderState) -> dict[str, Any]:
     """
     Feature Flags Agent - BTP Feature Flags, toggles, A/B config.
     
@@ -69,7 +72,10 @@ async def feature_flags_agent(state: BuilderState) -> BuilderState:
     - A/B testing setup
     - Feature flag service binding
     """
-    logger.info("Starting Feature Flags Agent")
+    agent_name = "feature_flags"
+    started_at = datetime.utcnow().isoformat()
+    
+    logger.info(f"[{agent_name}] Starting Feature Flags Agent")
     
     now = datetime.utcnow().isoformat()
     state["current_agent"] = "feature_flags"
@@ -78,55 +84,86 @@ async def feature_flags_agent(state: BuilderState) -> BuilderState:
     
     log_progress(state, "Starting feature flags phase...")
     
-    # Get context
-    project_name = state.get("project_name", "App")
-    description = state.get("project_description", "")
-    feature_flags_enabled = state.get("feature_flags_enabled", False)
+    # Check retry count
+    retry_count = state.get("retry_counts", {}).get(agent_name, 0)
+    max_retries = state.get("MAX_RETRIES", 5)
     
-    if not feature_flags_enabled:
-        log_progress(state, "Feature flags not enabled, skipping...")
-        feature_flags_config = {"enabled": False, "flags": []}
-    else:
-        # Retrieve RAG context
-        rag_docs = await retrieve_for_agent("feature_flags", f"feature flags A/B testing {project_name}")
-        rag_context = "\n\n".join(rag_docs) if rag_docs else ""
+    if retry_count >= max_retries:
+        logger.error(f"[{agent_name}] Max retries ({max_retries}) exhausted")
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
         
-        prompt = FEATURE_FLAGS_PROMPT.format(
-            project_name=project_name,
-            description=description or "No description provided",
-            feature_flags_enabled=feature_flags_enabled,
-        )
-        
-        if rag_context:
-            prompt = f"REFERENCE DOCUMENTATION:\n{rag_context}\n\n{prompt}"
-        
-        log_progress(state, "Generating feature flag configuration...")
-        
-        result = await generate_with_retry(
-            prompt=prompt,
-            system_prompt=FEATURE_FLAGS_SYSTEM_PROMPT,
-            state=state,
-            required_keys=["enabled", "flags"],
-            max_retries=3,
-            agent_name="feature_flags",
-        )
-        
-        if result:
-            feature_flags_config = result
-            log_progress(state, f"✅ Defined {len(result.get('flags', []))} feature flags")
+        return {
+            "agent_failed": True,
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "failed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": f"Max retries ({max_retries}) exhausted",
+                "logs": None,
+            }],
+            "validation_errors": [{
+                "agent": agent_name,
+                "code": "MAX_RETRIES_EXHAUSTED",
+                "message": f"Agent failed after {max_retries} retries",
+                "field": None,
+                "severity": "error",
+            }]
+        }
+    
+    try:
+    
+        # Get context
+        project_name = state.get("project_name", "App")
+        description = state.get("project_description", "")
+        feature_flags_enabled = state.get("feature_flags_enabled", False)
+    
+        if not feature_flags_enabled:
+            log_progress(state, "Feature flags not enabled, skipping...")
+            feature_flags_config = {"enabled": False, "flags": []}
         else:
-            log_progress(state, "⚠️ LLM generation failed - using minimal feature flags config")
-            feature_flags_config = {
-                "enabled": True,
-                "flags": [],
-                "service_binding": None
-            }
+            # Retrieve RAG context
+            rag_docs = await retrieve_for_agent("feature_flags", f"feature flags A/B testing {project_name}")
+            rag_context = "\n\n".join(rag_docs) if rag_docs else ""
+            
+            prompt = FEATURE_FLAGS_PROMPT.format(
+                project_name=project_name,
+                description=description or "No description provided",
+                feature_flags_enabled=feature_flags_enabled,
+            )
+            
+            if rag_context:
+                prompt = f"REFERENCE DOCUMENTATION:\n{rag_context}\n\n{prompt}"
+            
+            log_progress(state, "Generating feature flag configuration...")
+            
+            result = await generate_with_retry(
+                prompt=prompt,
+                system_prompt=FEATURE_FLAGS_SYSTEM_PROMPT,
+                state=state,
+                required_keys=["enabled", "flags"],
+                max_retries=3,
+                agent_name="feature_flags",
+            )
+            
+            if result:
+                feature_flags_config = result
+                log_progress(state, f"✅ Defined {len(result.get('flags', []))} feature flags")
+            else:
+                log_progress(state, "⚠️ LLM generation failed - using minimal feature flags config")
+                feature_flags_config = {
+                    "enabled": True,
+                    "flags": [],
+                    "service_binding": None
+                }
     
-    state["feature_flags_config"] = feature_flags_config
-    state["needs_correction"] = False
+        state["feature_flags_config"] = feature_flags_config
+        state["needs_correction"] = False
     
-    # Record execution
-    state["agent_history"] = state.get("agent_history", []) + [{
+        # Record execution
+        state["agent_history"] = state.get("agent_history", []) + [{
         "agent_name": "feature_flags",
         "status": "completed",
         "started_at": now,
@@ -134,7 +171,61 @@ async def feature_flags_agent(state: BuilderState) -> BuilderState:
         "duration_ms": None,
         "error": None,
         "logs": state.get("current_logs", []),
-    }]
+        }]
     
-    log_progress(state, "Feature flags complete.")
-    return state
+        log_progress(state, "Feature flags complete.")
+        # Success path
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+    
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
+    
+        return {
+        "agent_history": [{
+            "agent_name": agent_name,
+            "status": "completed",
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "duration_ms": duration_ms,
+            "error": None,
+            "logs": state.get("current_logs", []),
+        }],
+        "retry_counts": new_retry_counts,
+        "needs_correction": False,
+        "current_agent": agent_name,
+        "updated_at": completed_at,
+        }
+
+
+    except Exception as e:
+        logger.exception(f"[{agent_name}] Failed with error: {e}")
+        
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
+        
+        return {
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "failed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+            "duration_ms": duration_ms,
+            "error": str(e),
+            "logs": None,
+        }],
+        "retry_counts": new_retry_counts,
+        "needs_correction": True,
+        "validation_errors": [{
+            "agent": agent_name,
+            "code": "AGENT_ERROR",
+            "message": str(e),
+            "field": None,
+            "severity": "error",
+        }],
+        "current_agent": agent_name,
+        "updated_at": completed_at,
+    }

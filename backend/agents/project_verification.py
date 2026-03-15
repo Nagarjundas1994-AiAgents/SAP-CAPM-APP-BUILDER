@@ -12,10 +12,12 @@ import json
 import logging
 import shutil
 from datetime import datetime
+from typing import Any
 from pathlib import Path
 
 from backend.agents.progress import log_progress
 from backend.agents.state import BuilderState, GeneratedFile, VerificationCheck
+from backend.agents.resilience import with_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -125,9 +127,13 @@ def _build_report(
     return "\n".join(lines)
 
 
-async def project_verification_agent(state: BuilderState) -> BuilderState:
+@with_timeout(timeout_seconds=120)
+async def project_verification_agent(state: BuilderState) -> dict[str, Any]:
     """Run readiness checks against the generated on-disk workspace."""
-    logger.info("Starting Project Verification Agent")
+    agent_name = "project_verification"
+    started_at = datetime.utcnow().isoformat()
+    
+    logger.info(f"[{agent_name}] Starting Project Verification Agent")
 
     now = datetime.utcnow().isoformat()
     state["current_agent"] = "project_verification"
@@ -142,7 +148,28 @@ async def project_verification_agent(state: BuilderState) -> BuilderState:
             "status": "failed",
             "details": "No generated workspace path available",
         }]
-        return state
+        # Success path
+        completed_at = datetime.utcnow().isoformat()
+        duration_ms = int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds() * 1000)
+        
+        new_retry_counts = state.get("retry_counts", {}).copy()
+        new_retry_counts[agent_name] = retry_count + 1
+        
+        return {
+            "agent_history": [{
+                "agent_name": agent_name,
+                "status": "completed",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_ms": duration_ms,
+                "error": None,
+                "logs": state.get("current_logs", []),
+            }],
+            "retry_counts": new_retry_counts,
+            "needs_correction": False,
+            "current_agent": agent_name,
+            "updated_at": completed_at,
+        }
 
     workspace = Path(workspace_path)
     log_progress(state, f"Running verification checks in {workspace}...")

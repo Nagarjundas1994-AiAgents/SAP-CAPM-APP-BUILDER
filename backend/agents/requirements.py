@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 from backend.agents.progress import log_progress
+from backend.agents.resilience import with_timeout
 
 
 # =============================================================================
@@ -435,12 +436,12 @@ async def _generate_with_retry(
             if attempt < max_retries - 1:
                 current_prompt = f"""Your previous response could not be used. Error: {last_error}
 
-Previous response (first 500 chars): {response[:500]}
+            Previous response (first 500 chars): {response[:500]}
 
-CRITICAL: You MUST respond with ONLY valid JSON. No markdown, no explanation, no text before or after the JSON.
-Start your response with {{ and end with }}.
+            CRITICAL: You MUST respond with ONLY valid JSON. No markdown, no explanation, no text before or after the JSON.
+            Start your response with {{ and end with }}.
 
-{prompt}"""
+            {prompt}"""
 
         except Exception as e:
             last_error = str(e)
@@ -467,7 +468,8 @@ Start your response with {{ and end with }}.
 # Main Agent Function
 # =============================================================================
 
-async def requirements_agent(state: BuilderState) -> BuilderState:
+@with_timeout(timeout_seconds=180)
+async def requirements_agent(state: BuilderState) -> dict[str, Any]:
     """
     Requirements & Domain Agent (LLM-First)
 
@@ -483,7 +485,10 @@ async def requirements_agent(state: BuilderState) -> BuilderState:
 
     Returns updated state with entities, relationships, and business rules.
     """
-    logger.info("Starting Requirements Agent (LLM-First)")
+    agent_name = "requirements"
+    started_at = datetime.utcnow().isoformat()
+    
+    logger.info(f"[{agent_name}] Starting Requirements Agent (LLM-First)")
 
     now = datetime.utcnow().isoformat()
     errors: list[ValidationError] = []
